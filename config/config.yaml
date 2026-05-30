@@ -1,0 +1,45 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Search configuration — edit queries and filters here
+# ─────────────────────────────────────────────────────────────────────────────
+
+scraper:
+  slow_mo: 1.5
+  max_workers: 1
+  page_load_timeout: 40
+  headless: true
+
+queries:
+  - query: "Machine Learning Engineer"
+    locations:
+      - "Bangalore, India"
+      - "Mumbai, India"
+      - "Pune, India"
+    limit: 50
+    filters:
+      relevance: RECENT
+      time: MONTH
+      type:
+        - FULL_TIME
+
+llm:
+  provider: "${LLM_PROVIDER}"
+  model: "${LLM_MODEL}"
+  temperature: 0.1
+  max_tokens: 2000
+
+matching:
+  embedding_model: "all-MiniLM-L6-v2"
+  score_weights:
+    semantic_similarity: 0.40
+    skills_overlap: 0.35
+    experience_match: 0.15
+    title_match: 0.10
+  min_score_threshold: 0.40
+
+features:
+  cover_letter: true
+  ats_score: true
+  skill_gap: true
+  company_research: true
+  interview_prep: true
+  salary_benchmark: true
