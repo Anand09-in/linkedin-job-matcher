@@ -49,6 +49,7 @@ class Job(Base):
     match_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     matched_skills: Mapped[list | None] = mapped_column(JSON, nullable=True)
     missing_skills: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    scored_with_resume_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
     # ── Application tracking ──────────────────────────────────────────────────
     # Status flow: new → saved → applied → interview → offer / rejected
@@ -81,6 +82,7 @@ class Job(Base):
             "match_score": self.match_score,
             "matched_skills": self.matched_skills,
             "missing_skills": self.missing_skills,
+            "scored_with_resume_id": self.scored_with_resume_id,
             "status": self.status,
             "scraped_at": self.scraped_at.isoformat() if self.scraped_at else None,
         }

@@ -219,7 +219,7 @@ class ScraperService:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def run_sync(self, config_snapshot: Optional[dict] = None) -> dict:
+    def run_sync(self, config_snapshot: Optional[dict] = None, run_id: Optional[str] = None) -> dict:
         """
         Blocking scrape run. Designed to be called from a thread.
 
@@ -239,11 +239,12 @@ class ScraperService:
         # ── 1. Validate cookie ────────────────────────────────────────────────
         self._set_cookie()
 
-        # ── 2. Create ScrapeRun record ────────────────────────────────────────
+        # ── 2. Create ScrapeRun record (or reuse one created by the route) ──────
         snapshot = config_snapshot or self._cfg
-        with SyncSession() as session:
-            repo = SyncJobRepository(session)
-            run_id = repo.create_scrape_run(snapshot)
+        if run_id is None:
+            with SyncSession() as session:
+                repo = SyncJobRepository(session)
+                run_id = repo.create_scrape_run(snapshot)
         self._run_id = run_id
 
         # ── 3. Build and run scraper ──────────────────────────────────────────

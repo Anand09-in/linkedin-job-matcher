@@ -127,8 +127,8 @@ class SyncJobRepository:
         )
         self._s.commit()
 
-    def batch_update_match_scores(self, scored_jobs: list[dict]) -> None:
-        """Persist match_score, matched_skills, missing_skills for all scored jobs."""
+    def batch_update_match_scores(self, scored_jobs: list[dict], resume_id: str = "") -> None:
+        """Persist match_score, matched_skills, missing_skills, scored_with_resume_id."""
         for job in scored_jobs:
             job_id = job.get("id")
             if not job_id:
@@ -138,6 +138,7 @@ class SyncJobRepository:
                     match_score=job.get("match_score"),
                     matched_skills=job.get("matched_skills"),
                     missing_skills=job.get("missing_skills"),
+                    scored_with_resume_id=resume_id or None,
                     updated_at=datetime.utcnow(),
                 )
             )

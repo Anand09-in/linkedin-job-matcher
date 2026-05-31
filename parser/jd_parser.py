@@ -17,11 +17,14 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from loguru import logger
 from pydantic import ValidationError
+from botocore.exceptions import ClientError
 from tenacity import (
     retry,
+    retry_if_exception,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
+    wait_random,
 )
 
 from config.llm_factory import get_llm
@@ -82,9 +85,14 @@ class JDParser:
     # ── Core parse with retry ─────────────────────────────────────────────────
 
     @retry(
-        retry=retry_if_exception_type((ValueError, json.JSONDecodeError)),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=(
+            retry_if_exception_type((ValueError, json.JSONDecodeError))
+            | retry_if_exception(lambda e: isinstance(e, ClientError) and
+                e.response.get("Error", {}).get("Code") in
+                ("ThrottlingException", "TooManyRequestsException", "RequestLimitExceeded"))
+        ),
+        stop=stop_after_attempt(6),
+        wait=wait_exponential(multiplier=2, min=5, max=60) + wait_random(0, 3),
         reraise=True,
     )
     def _call_llm(self, description: str) -> dict:
@@ -157,8 +165,11 @@ class JDParser:
         Parse a list of job descriptions sequentially.
         Returns a list of ParsedJD (same length as input, empty objects for failures).
         """
+        import time
         results = []
         for i, desc in enumerate(descriptions):
             logger.info(f"[JDParser] Parsing JD {i+1}/{len(descriptions)}")
             results.append(self.parse(desc))
+            if i < len(descriptions) - 1:
+                time.sleep(1.5)  # avoid Bedrock throttling between calls
         return results

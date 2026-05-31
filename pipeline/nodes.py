@@ -28,7 +28,7 @@ import concurrent.futures
 from typing import Any
 
 from loguru import logger
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, or_, select
 from sqlalchemy.orm import sessionmaker
 
 from config.llm_factory import get_llm
@@ -65,16 +65,29 @@ def scraper_node(state: PipelineState) -> dict:
         engine = create_engine(sync_url, echo=False)
         Session = sessionmaker(bind=engine)
 
+        resume_id = state.get("resume_id") or ""
+
         with Session() as session:
-            # Load all jobs that haven't been matched yet against this resume
-            # (or all jobs if we want to re-score)
-            jobs = session.execute(
-                select(Job).order_by(Job.scraped_at.desc())
+            # Only load jobs that need scoring:
+            #   - never scored, OR scored with a different resume
+            needs_scoring = session.execute(
+                select(Job).where(
+                    or_(
+                        Job.match_score.is_(None),
+                        Job.scored_with_resume_id.is_(None),
+                        Job.scored_with_resume_id != resume_id,
+                    )
+                ).order_by(Job.scraped_at.desc())
             ).scalars().all()
 
-            raw_jobs = [j.to_dict() for j in jobs]
+            total = session.execute(select(func.count(Job.id))).scalar()
+            raw_jobs = [j.to_dict() for j in needs_scoring]
 
-        logger.info(f"[scraper_node] Loaded {len(raw_jobs)} jobs from DB")
+        skipped = total - len(raw_jobs)
+        logger.info(
+            f"[scraper_node] {len(raw_jobs)} jobs need scoring, "
+            f"{skipped} already scored with current resume — skipping"
+        )
         return {"raw_jobs": raw_jobs, "errors": errors}
 
     except Exception as e:
@@ -277,6 +290,7 @@ def matcher_node(state: PipelineState) -> dict:
     parsed_jobs: list[dict] = state.get("parsed_jobs") or []
     candidate_profile: dict = state.get("candidate_profile") or {}
     resume_text: str = state.get("resume_text") or ""
+    resume_id: str = state.get("resume_id") or ""
     errors: list[str] = list(state.get("errors") or [])
 
     if not parsed_jobs:
@@ -297,10 +311,10 @@ def matcher_node(state: PipelineState) -> dict:
             resume_raw_text=resume_text,
         )
 
-        # Persist match scores to DB
+        # Persist match scores to DB, tagging each job with the resume used
         with SyncSession() as session:
             repo = SyncJobRepository(session)
-            repo.batch_update_match_scores(scored_jobs)
+            repo.batch_update_match_scores(scored_jobs, resume_id=resume_id)
 
         logger.info(f"[matcher_node] Done — {len(scored_jobs)} jobs scored, {len(skill_gaps)} skill gaps")
         return {"scored_jobs": scored_jobs, "skill_gaps": skill_gaps, "errors": errors}

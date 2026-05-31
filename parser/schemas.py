@@ -38,10 +38,11 @@ class ParsedJD(BaseModel):
     responsibilities: list[str] = Field(default_factory=list)
     company_info: CompanyInfo = Field(default_factory=CompanyInfo)
 
-    @field_validator("skills_required", "skills_nice_to_have", mode="before")
+    @field_validator("skills_required", "skills_nice_to_have", "responsibilities", mode="before")
     @classmethod
-    def normalise_skills(cls, v):
-        """Lowercase and strip whitespace from all skill strings."""
+    def normalise_list(cls, v):
+        if v is None:
+            return []
         if isinstance(v, list):
             return [s.strip().lower() for s in v if isinstance(s, str) and s.strip()]
         return []
