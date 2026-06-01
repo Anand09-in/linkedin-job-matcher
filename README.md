@@ -2,6 +2,7 @@
 
 > AI-powered job search — scrapes LinkedIn, matches against your resume, and generates cover letters, interview prep, salary research, and career planning.
 
+## 📺 Full Demo (Youtube)
 [![LinkedIn Job Matcher — Full Demo](https://img.youtube.com/vi/mzmbP9_ZOow/maxresdefault.jpg)](https://youtu.be/mzmbP9_ZOow)
 
 ## Stack
