@@ -21,7 +21,7 @@ uvicorn api.main:app --reload --port 8000   # terminal 1
 streamlit run ui/app.py                      # terminal 2
 ```
 
-UI → http://localhost:8501 · API docs → http://localhost:8000/docs
+UI → port 8501 · API docs → port 8000/docs
 
 ### Docker
 ```bash
