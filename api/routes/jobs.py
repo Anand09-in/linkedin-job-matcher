@@ -71,7 +71,7 @@ async def list_jobs(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     # Sorting
-    sort_by: str = Query("match_score", description="match_score | scraped_at | company | title"),
+    sort_by: str = Query("match_score", description="match_score | scraped_at | company | title | experience"),
     repo: AsyncJobRepository = Depends(get_repo),
 ):
     """
@@ -117,6 +117,7 @@ async def list_jobs(
         "scraped_at":  Job.scraped_at.desc(),
         "company":     Job.company.asc(),
         "title":       Job.title.asc(),
+        "experience":  nullslast(Job.experience_years_min.asc()),
     }
     order_clause = sort_map.get(sort_by, nullslast(Job.match_score.desc()))
     q = q.order_by(order_clause).limit(limit).offset(offset)

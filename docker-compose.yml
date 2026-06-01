@@ -1,0 +1,42 @@
+version: "3.9"
+
+services:
+
+  # ── FastAPI backend ──────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: job_matcher_api
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - job_data:/app/data          # shared SQLite + embedding cache
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ── Streamlit UI ─────────────────────────────────────────────────────────────
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    container_name: job_matcher_ui
+    env_file: .env
+    ports:
+      - "8501:8501"
+    environment:
+      - API_BASE_URL=http://api:8000   # UI talks to the API container by name
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  job_data:
+    driver: local

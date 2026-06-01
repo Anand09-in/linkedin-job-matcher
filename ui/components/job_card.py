@@ -14,12 +14,32 @@ def _score_label(score: float | None) -> str:
     return "🔴 Weak match"
 
 
+def _fmt_date(job: dict) -> str:
+    """Return posting date if available, otherwise scraped_at formatted as a date string."""
+    date_posted = job.get("date_posted")
+    if date_posted:
+        return date_posted
+    scraped = job.get("scraped_at")
+    if scraped:
+        # scraped_at comes back as a datetime or ISO string from the API
+        try:
+            from datetime import datetime
+            if isinstance(scraped, str):
+                return datetime.fromisoformat(scraped).strftime("scraped %d %b")
+            return scraped.strftime("scraped %d %b")
+        except Exception:
+            pass
+    return "—"
+
+
 def job_card(job: dict) -> str | None:
     score     = job.get("match_score")
     score_pct = f"{score:.0%}" if score is not None else "—"
     matched   = job.get("matched_skills") or []
     missing   = job.get("missing_skills") or []
     status    = job.get("status", "new")
+    exp_years = job.get("experience_years")          # e.g. "3-5 years"
+    exp_min   = job.get("experience_years_min")      # integer lower bound
 
     with st.container(border=True):
         # ── Header row ────────────────────────────────────────────────────────
@@ -29,12 +49,17 @@ def job_card(job: dict) -> str | None:
             st.caption(
                 f"🏢 {job.get('company','—')}  |  "
                 f"📍 {job.get('location') or 'N/A'}  |  "
-                f"📅 {job.get('date_posted') or 'N/A'}"
+                f"📅 {_fmt_date(job)}"
             )
             tags = [f"`{status.upper()}`"]
             if job.get("seniority_level"): tags.append(f"`{job['seniority_level']}`")
             if job.get("remote_policy"):   tags.append(f"`{job['remote_policy']}`")
             if job.get("employment_type"): tags.append(f"`{job['employment_type']}`")
+            # Experience required — prefer the human-readable string, fall back to min years
+            if exp_years:
+                tags.append(f"`🕐 {exp_years}`")
+            elif exp_min is not None:
+                tags.append(f"`🕐 {exp_min}+ yrs`")
             st.markdown("  ".join(tags))
         with col_score:
             st.metric("Match", score_pct)

@@ -1,34 +1,96 @@
 # LinkedIn Job Matcher
 
-An AI-powered job search assistant that scrapes LinkedIn, parses job descriptions,
-matches them against your resume, and surfaces insights like skill gaps and interview prep.
+> AI-powered job search — scrapes LinkedIn, matches against your resume, and generates cover letters, interview prep, salary research, and career planning.
+
+<!-- Replace with your own screenshot or GIF -->
+<!-- ![UI Demo](docs/demo.gif) -->
 
 ## Stack
-- **Scraper**: `linkedin-jobs-scraper` + Selenium
-- **Pipeline**: LangGraph (multi-node agent graph)
-- **Backend**: FastAPI + SQLite (via SQLAlchemy async)
-- **UI**: Streamlit
-- **LLM**: Model-agnostic via LangChain (Claude / Groq / GPT-4o / Ollama)
+`FastAPI` · `Streamlit` · `LangGraph` · `LangChain` · `sentence-transformers` · `SQLite`  
+LLM-agnostic: Groq / Anthropic / OpenAI / Gemini / Ollama / AWS Bedrock
 
-## Quick start
+---
+
+## Quick Start
 
 ```bash
-cp .env.example .env
-# Fill in LI_AT_COOKIE and LLM keys in .env
-
 pip install -r requirements.txt
+cp .env.example .env   # fill in LI_AT_COOKIE + LLM key
 
-# Start backend
-uvicorn api.main:app --reload --port 8000
-
-# Start UI (separate terminal)
-streamlit run ui/app.py
+uvicorn api.main:app --reload --port 8000   # terminal 1
+streamlit run ui/app.py                      # terminal 2
 ```
 
-## How to get your LI_AT_COOKIE
-1. Log into LinkedIn in Chrome
-2. Open DevTools → Application → Cookies → `https://www.linkedin.com`
-3. Copy the value of the `li_at` cookie
+UI → http://localhost:8501 · API docs → http://localhost:8000/docs
 
-## Phases
-See `TASKS.md` for the full phase-by-phase task breakdown.
+### Docker
+```bash
+docker-compose up --build
+```
+
+---
+
+## Setup
+
+### LinkedIn Cookie
+1. Log in to LinkedIn → DevTools → **Application → Cookies**
+2. Copy `li_at` value → set `LI_AT_COOKIE=` in `.env`
+
+> Expires ~every 30 days.
+
+### LLM Provider
+
+| Provider | `.env` key | Notes |
+|----------|-----------|-------|
+| `groq` | `GROQ_API_KEY` | Free, fast — recommended |
+| `anthropic` | `ANTHROPIC_API_KEY` | Claude |
+| `openai` | `OPENAI_API_KEY` | GPT-4o |
+| `gemini` | `GOOGLE_API_KEY` | Free tier |
+| `bedrock` | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` | Claude/Llama on AWS |
+| `ollama` | — | Local, set `OLLAMA_BASE_URL` |
+
+The **✨ AI Features** sidebar lets you switch models per-session without touching `.env`.
+
+---
+
+## Workflow
+
+**Search & Scrape → Resume & Match → Job Results → Skill Gaps → ✨ AI Features → Tracker**
+
+### ✨ AI Features
+
+| Tab | What it does |
+|-----|-------------|
+| ✉️ Cover Letter | Cliché-free 3-paragraph letter, cached per job |
+| 📊 ATS Score | Instant keyword scan (no LLM): keyword density, title words, section headers, quantified achievements |
+| 🎤 Interview Prep | 12 questions × 4 categories with answer frameworks |
+| 🏢 Company & Salary | DuckDuckGo salary search + LLM company analysis |
+| 📝 Resume Tips | Section rewrites, missing keywords, rewritten summary |
+
+**Career Path Planner** — now / 6 months / 2 years horizons + learning roadmap.
+
+### Export
+Download from the **Job Results** page:  `⬇️ CSV` · `📊 Excel` (3 sheets: jobs, skill gaps, status board)
+
+### Auto-Scrape
+```env
+SCHEDULER_ENABLED=true
+SCHEDULER_INTERVAL_HOURS=12
+```
+
+---
+
+## Key `.env` Variables
+
+```env
+LI_AT_COOKIE=
+LLM_PROVIDER=groq          # groq | anthropic | openai | gemini | bedrock | ollama
+GROQ_API_KEY=              # fill whichever provider you use
+
+# Optional
+SCHEDULER_ENABLED=false
+SCHEDULER_INTERVAL_HOURS=12
+SCRAPER_BACKOFF_BASE=5.0   # seconds, for LinkedIn 429 backoff
+```
+
+Full list in `.env.example`.

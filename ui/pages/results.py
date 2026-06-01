@@ -66,7 +66,7 @@ def render() -> None:
         )
         has_score = st.checkbox("Only matched jobs", value=True)
 
-        sort_by = st.selectbox("Sort by", ["match_score", "scraped_at", "company", "title"])
+        sort_by = st.selectbox("Sort by", ["match_score", "experience", "scraped_at", "company", "title"])
 
         st.divider()
         page = st.number_input("Page", min_value=1, value=1, step=1)
@@ -97,11 +97,26 @@ def render() -> None:
     except Exception:
         stats = {}
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 2, 3])
     c1.metric("Total jobs",    stats.get("total_jobs", "—"))
     c2.metric("Matched",       stats.get("with_match_score", "—"))
     c3.metric("Avg score",     f"{stats.get('avg_match_score', 0):.0%}")
     c4.metric("Showing",       len(jobs))
+    with c5:
+        st.markdown(" ")
+        ec1, ec2 = st.columns(2)
+        with ec1:
+            st.link_button(
+                "⬇️ CSV",
+                f"http://localhost:8000/export/csv?has_score={str(has_score).lower()}&min_score={min_score if min_score > 0 else 0}",
+                use_container_width=True,
+            )
+        with ec2:
+            st.link_button(
+                "📊 Excel",
+                f"http://localhost:8000/export/excel?has_score={str(has_score).lower()}&min_score={min_score if min_score > 0 else 0}",
+                use_container_width=True,
+            )
 
     # ── Score distribution (from session state if available) ──────────────────
     all_jobs = st.session_state.get("scored_jobs", jobs)

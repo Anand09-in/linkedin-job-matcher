@@ -9,6 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import yaml
+from loguru import logger
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -56,12 +57,61 @@ class Settings(BaseSettings):
     app_env: str = "development"
     log_level: str = "INFO"
 
+    # ── Scheduler ─────────────────────────────────────────────────────────────
+    scheduler_enabled: bool = Field(False, description="Auto-run scraper in background")
+    scheduler_interval_hours: int = Field(12, description="Scrape interval in hours")
+
+    # ── Scraper backoff ───────────────────────────────────────────────────────
+    scraper_backoff_base: float = Field(5.0, description="Base seconds for exponential backoff on 429")
+
     @property
     def yaml_config(self) -> dict:
         text = (ROOT / "config" / "config.yaml").read_text()
         for k, v in os.environ.items():
             text = text.replace(f"${{{k}}}", v)
         return yaml.safe_load(text)
+
+    def validate_all(self) -> None:
+        """
+        Full startup validation. Called from api/main.py lifespan.
+
+        Fatal (sys.exit):  data directory not writable
+        Warning (logged):  missing cookie, missing LLM key
+        """
+        import sys
+        from pathlib import Path
+
+        # ── 1. Data directory ─────────────────────────────────────────────────
+        db_path = self.database_url.split("///")[-1]
+        data_dir = Path(db_path).parent
+        try:
+            data_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logger.critical(f"[Startup] Cannot create data dir {data_dir}: {e}")
+            sys.exit(1)
+
+        probe = data_dir / ".write_probe"
+        try:
+            probe.touch()
+            probe.unlink()
+            logger.info(f"[Startup] Data directory OK: {data_dir}")
+        except OSError as e:
+            logger.critical(f"[Startup] Data directory {data_dir} not writable: {e}")
+            sys.exit(1)
+
+        # ── 2. LinkedIn cookie ────────────────────────────────────────────────
+        if not self.li_at_cookie:
+            logger.warning(
+                "[Startup] LI_AT_COOKIE not set — scraping will fail. "
+                "Set it in .env (LinkedIn DevTools → Application → Cookies → li_at)"
+            )
+
+        # ── 3. LLM credentials ────────────────────────────────────────────────
+        try:
+            self.validate_llm_config()
+            logger.info("[Startup] LLM config valid ✓")
+        except ValueError as e:
+            logger.warning(f"[Startup] LLM config warning: {e} — AI features may fail")
 
     def validate_llm_config(self) -> None:
         """Raise early with a clear message if required keys are missing."""

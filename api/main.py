@@ -21,7 +21,7 @@ from fastapi.responses import JSONResponse
 from loguru import logger
 
 from api.models import ErrorResponse, HealthResponse
-from api.routes import scrape, jobs, match, features
+from api.routes import scrape, jobs, match, features, export
 from db.database import init_db
 
 
@@ -35,17 +35,16 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Database ready ✓")
 
-    # Validate LLM config on startup (warns but doesn't crash — API still useful for jobs/scrape)
-    try:
-        from config.settings import get_settings
-        get_settings().validate_llm_config()
-        logger.info("LLM config valid ✓")
-    except ValueError as e:
-        logger.warning(f"LLM config warning: {e} — /match endpoint may fail")
+    from config.settings import get_settings
+    get_settings().validate_all()   # checks data dir, cookie, LLM keys
+
+    # Start background scheduler if enabled
+    from api.scheduler import start_scheduler, stop_scheduler
+    await start_scheduler()
 
     yield
 
-    # Shutdown
+    await stop_scheduler()
     logger.info("Shutting down.")
 
 
@@ -134,6 +133,7 @@ app.include_router(scrape.router)
 app.include_router(jobs.router)
 app.include_router(match.router)
 app.include_router(features.router)
+app.include_router(export.router)
 
 
 # ── Health & root ─────────────────────────────────────────────────────────────

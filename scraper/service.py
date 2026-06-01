@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 import uuid
 from typing import Callable, Optional
 
@@ -203,9 +204,27 @@ class ScraperService:
         logger.debug(f"[METRICS] {metrics}")
 
     def _on_error(self, error: Exception) -> None:
-        logger.error(f"[SCRAPER ERROR] {error}")
+        err_str = str(error).lower()
+        is_rate_limit = any(kw in err_str for kw in ("429", "rate limit", "too many requests", "ratelimit"))
+
         with self._lock:
             self._stats["errors"] += 1
+            if is_rate_limit:
+                self._stats["rate_limited"] += 1
+                retry_n = self._stats["rate_limited"]
+
+        if is_rate_limit:
+            wait = min(
+                2 ** retry_n * settings.scraper_backoff_base,
+                300,  # cap at 5 minutes
+            )
+            logger.warning(
+                f"[SCRAPER] Rate-limited (429) — backing off {wait:.0f}s "
+                f"(attempt {retry_n}, base={settings.scraper_backoff_base}s)"
+            )
+            time.sleep(wait)
+        else:
+            logger.error(f"[SCRAPER ERROR] {error}")
 
     def _on_end(self) -> None:
         with self._lock:
@@ -234,7 +253,7 @@ class ScraperService:
             }
         """
         self._collected = []
-        self._stats = {"new": 0, "updated": 0, "errors": 0}
+        self._stats = {"new": 0, "updated": 0, "errors": 0, "rate_limited": 0}
 
         # ── 1. Validate cookie ────────────────────────────────────────────────
         self._set_cookie()
