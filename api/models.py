@@ -142,3 +142,183 @@ class HealthResponse(BaseModel):
 class ErrorResponse(BaseModel):
     detail: str
     error_type: Optional[str] = None
+
+
+# ── Phase 6 Feature responses ─────────────────────────────────────────────────
+
+class CoverLetterResponse(BaseModel):
+    job_id: str
+    job_title: str
+    company: str
+    cover_letter: str
+    tone: str
+    word_count: int
+    cached: bool = False
+
+
+class ATSComponentScores(BaseModel):
+    keyword_density: float
+    title_word_presence: float
+    section_coverage: float
+    quantified_achievements: float
+
+
+class ATSResponse(BaseModel):
+    job_id: str
+    resume_id: str
+    overall_score: float
+    components: ATSComponentScores
+    matched_keywords: list[str]
+    missing_keywords: list[str]
+    matched_title_words: list[str]
+    missing_title_words: list[str]
+    detected_sections: list[str]
+    quant_count: int
+    predicted_pass: bool
+    tips: list[str]
+
+
+class InterviewQuestion(BaseModel):
+    category: str
+    question: str
+    answer_framework: str
+    key_points: list[str]
+
+
+class InterviewPrepResponse(BaseModel):
+    job_id: str
+    job_title: str
+    company: str
+    questions: list[InterviewQuestion]
+    prep_tips: list[str]
+
+
+class SalaryRangeResponse(BaseModel):
+    min_amount: Optional[float] = None
+    max_amount: Optional[float] = None
+    currency: str = "USD"
+    period: str = "annual"
+    raw_text: Optional[str] = None
+
+
+class SalaryBenchmarkResponse(BaseModel):
+    job_id: str
+    job_title: str
+    location: Optional[str]
+    currency: str
+    extracted_salary: Optional[SalaryRangeResponse]
+    market_low: float
+    market_mid: float
+    market_high: float
+    your_likely_band: str
+    negotiation_tips: list[str]
+    benefits_to_ask: list[str]
+    notes: list[str]
+
+
+class CompanyResearchResponse(BaseModel):
+    job_id: str
+    company: str
+    location: Optional[str]
+    seniority_hint: Optional[str]
+    employment_type: Optional[str]
+    job_function: Optional[str]
+    industry: Optional[str]
+    remote_policy: Optional[str]
+    salary_hint: Optional[str]
+    domain: Optional[str]
+    size_hint: Optional[str]
+    tech_stack_hints: list[str]
+    culture_signals: list[str]
+    green_flags: list[str]
+    red_flags: list[str]
+    overall_impression: str
+
+
+class TrackerStatsResponse(BaseModel):
+    total_saved: int
+    total_applied: int
+    total_interviews: int
+    total_offers: int
+    total_rejected: int
+    apply_to_interview_rate: float
+    interview_to_offer_rate: float
+
+
+class LearningItemResponse(BaseModel):
+    skill: str
+    why: str
+    estimated_weeks: int
+    resources: list[str]
+
+
+class TimeHorizonResponse(BaseModel):
+    horizon: str
+    label: str
+    roles: list[str]
+    action_items: list[str]
+
+
+class CareerPathResponse(BaseModel):
+    current_title: str
+    total_exp_years: float
+    horizons: list[TimeHorizonResponse]
+    learning_roadmap: list[LearningItemResponse]
+    summary: str
+
+
+class WebSnippetResponse(BaseModel):
+    title: str
+    body: str
+    url: str = ""
+
+
+class CompanyIntelResponse(BaseModel):
+    job_id: str
+    company: str
+    location: Optional[str]
+    seniority_hint: Optional[str]
+    employment_type: Optional[str]
+    job_function: Optional[str]
+    industry: Optional[str]
+    remote_policy: Optional[str]
+    domain: Optional[str]
+    size_hint: Optional[str]
+    tech_stack_hints: list[str]
+    culture_signals: list[str]
+    green_flags: list[str]
+    red_flags: list[str]
+    overall_impression: str
+    salary_min: Optional[float]
+    salary_max: Optional[float]
+    salary_currency: str
+    salary_period: str
+    salary_source: str
+    market_low: float
+    market_mid: float
+    market_high: float
+    your_likely_band: str
+    negotiation_tips: list[str]
+    benefits_to_ask: list[str]
+    web_search_used: bool
+    search_query: str = ""
+    search_snippets: list[WebSnippetResponse] = []
+
+
+class ResumeSuggestionResponse(BaseModel):
+    section: str
+    priority: str
+    issue: str
+    suggestion: str
+    example: Optional[str] = None
+
+
+class ResumeImprovementResponse(BaseModel):
+    job_id: str
+    job_title: str
+    company: str
+    overall_fit_grade: str
+    suggestions: list[ResumeSuggestionResponse]
+    keywords_to_add: list[str]
+    summary_rewrite: str
+    top_actions: list[str]

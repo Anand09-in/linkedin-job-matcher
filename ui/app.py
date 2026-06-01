@@ -78,6 +78,7 @@ with st.sidebar:
             "📋 Job Results",
             "📈 Skill Gaps",
             "🗂️ Tracker",
+            "✨ AI Features",
         ],
         label_visibility="collapsed",
     )
@@ -107,7 +108,15 @@ with st.sidebar:
     else:
         st.caption("📄 No resume uploaded")
 
-# ── Force reload UI modules so file changes are always picked up ──────────────
+# ── Reload all UI modules on every run so edits are picked up without restart ─
+import importlib, sys
+_UI_MODULES = [m for m in list(sys.modules) if m.startswith("ui.")]
+for _mod in _UI_MODULES:
+    try:
+        importlib.reload(sys.modules[_mod])
+    except Exception:
+        pass
+
 # ── Page routing ──────────────────────────────────────────────────────────────
 if page == "🔍 Search & Scrape":
     from ui.pages import search
@@ -128,3 +137,7 @@ elif page == "📈 Skill Gaps":
 elif page == "🗂️ Tracker":
     from ui.pages import tracker
     tracker.render()
+
+elif page == "✨ AI Features":
+    from ui.pages import features
+    features.render()

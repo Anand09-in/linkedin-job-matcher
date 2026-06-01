@@ -56,6 +56,21 @@ def _post(path: str, json: dict | None = None, files=None) -> dict:
         raise RuntimeError(f"API error {e.response.status_code}: {detail}")
 
 
+def _post_with_params(path: str, params: dict | None = None, json: dict | None = None) -> dict:
+    try:
+        r = _CLIENT.post(f"{BASE_URL}{path}", params=params, json=json or {}, follow_redirects=True)
+        r.raise_for_status()
+        return r.json()
+    except httpx.ConnectError:
+        raise RuntimeError("Cannot connect to API. Is `uvicorn api.main:app` running?")
+    except httpx.HTTPStatusError as e:
+        try:
+            detail = e.response.json().get("detail", str(e))
+        except Exception:
+            detail = e.response.text or str(e)
+        raise RuntimeError(f"API error {e.response.status_code}: {detail}")
+
+
 def _patch(path: str, json: dict) -> dict:
     try:
         r = _CLIENT.patch(f"{BASE_URL}{path}", json=json, follow_redirects=True)
@@ -178,3 +193,95 @@ def run_match(resume_id: Optional[str] = None) -> dict:
 def get_skill_gaps(limit: int = 20) -> dict:
     """GET /features/skill-gaps"""
     return _get("/features/skill-gaps", params={"limit": limit})
+
+
+def generate_cover_letter(
+    job_id: str, tone: str = "professional",
+    resume_id: str | None = None,
+    model: str | None = None, provider: str | None = None,
+) -> dict:
+    """POST /features/cover-letter/{job_id}"""
+    params: dict = {"tone": tone}
+    if resume_id: params["resume_id"] = resume_id
+    if model:     params["model"] = model
+    if provider:  params["provider"] = provider
+    return _post_with_params(f"/features/cover-letter/{job_id}", params=params)
+
+
+def get_ats_score(job_id: str, resume_id: str | None = None) -> dict:
+    """GET /features/ats-score/{job_id}  (no LLM — no model param needed)"""
+    params: dict = {}
+    if resume_id: params["resume_id"] = resume_id
+    return _get(f"/features/ats-score/{job_id}", params=params or None)
+
+
+def generate_interview_prep(
+    job_id: str, resume_id: str | None = None,
+    model: str | None = None, provider: str | None = None,
+) -> dict:
+    """POST /features/interview-prep/{job_id}"""
+    params: dict = {}
+    if resume_id: params["resume_id"] = resume_id
+    if model:     params["model"] = model
+    if provider:  params["provider"] = provider
+    return _post_with_params(f"/features/interview-prep/{job_id}", params=params)
+
+
+def get_company_research(
+    job_id: str, resume_id: str | None = None,
+    model: str | None = None, provider: str | None = None,
+) -> dict:
+    """GET /features/company-research/{job_id}"""
+    params: dict = {}
+    if resume_id: params["resume_id"] = resume_id
+    if model:     params["model"] = model
+    if provider:  params["provider"] = provider
+    return _get(f"/features/company-research/{job_id}", params=params or None)
+
+
+def get_salary_benchmark(job_id: str, resume_id: str | None = None) -> dict:
+    """GET /features/salary-benchmark/{job_id}  (no LLM — no model param needed)"""
+    params: dict = {}
+    if resume_id: params["resume_id"] = resume_id
+    return _get(f"/features/salary-benchmark/{job_id}", params=params or None)
+
+
+def get_tracker_stats() -> dict:
+    """GET /features/tracker-stats"""
+    return _get("/features/tracker-stats")
+
+
+def get_company_intel(
+    job_id: str, resume_id: str | None = None,
+    model: str | None = None, provider: str | None = None,
+) -> dict:
+    """GET /features/company-intel/{job_id} — combined company + salary with web search"""
+    params: dict = {}
+    if resume_id: params["resume_id"] = resume_id
+    if model:     params["model"] = model
+    if provider:  params["provider"] = provider
+    return _get(f"/features/company-intel/{job_id}", params=params or None)
+
+
+def improve_resume(
+    job_id: str, resume_id: str | None = None,
+    model: str | None = None, provider: str | None = None,
+) -> dict:
+    """POST /features/resume-improve/{job_id}"""
+    params: dict = {}
+    if resume_id: params["resume_id"] = resume_id
+    if model:     params["model"] = model
+    if provider:  params["provider"] = provider
+    return _post_with_params(f"/features/resume-improve/{job_id}", params=params)
+
+
+def generate_career_path(
+    resume_id: str | None = None,
+    model: str | None = None, provider: str | None = None,
+) -> dict:
+    """POST /features/career-path — 3-horizon career plan + learning roadmap"""
+    params: dict = {}
+    if resume_id: params["resume_id"] = resume_id
+    if model:     params["model"] = model
+    if provider:  params["provider"] = provider
+    return _post_with_params("/features/career-path", params=params)

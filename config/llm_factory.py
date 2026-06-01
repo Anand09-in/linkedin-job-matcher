@@ -78,21 +78,31 @@ def _build_bedrock(model: str, temperature: float, max_tokens: int) -> BaseChatM
     """
     Amazon Bedrock via langchain-aws.
 
-    Recommended free-tier models:
-        anthropic.claude-3-haiku-20240307-v1:0   ← best quality/cost
-        meta.llama3-8b-instruct-v1:0
-        mistral.mistral-7b-instruct-v0:2
+    Supported chat model families:
+        anthropic.claude-*          ← best quality
+        meta.llama*                 ← free tier, good speed
+        mistral.*                   ← free tier
+        amazon.nova-*               ← Amazon's own models
 
-    Auth (pick one):
-        1. Set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY in .env
-        2. Configure ~/.aws/credentials (aws configure)
-        3. Use an IAM role (on EC2/Lambda — no keys needed)
+    NOT supported for chat (text-generation only):
+        google.gemma-*
+        amazon.titan-text-*
+        cohere.command-text-*
     """
+    _NO_CHAT_PREFIXES = ("google.", "amazon.titan-text", "cohere.command-text")
+    if any(model.startswith(p) for p in _NO_CHAT_PREFIXES):
+        raise ValueError(
+            f"Bedrock model '{model}' does not support the chat API format. "
+            f"Use a chat-compatible model instead: "
+            f"anthropic.claude-3-haiku-20240307-v1:0 | "
+            f"meta.llama3-70b-instruct-v1:0 | "
+            f"mistral.mistral-large-2402-v1:0"
+        )
+
     try:
         from langchain_aws import ChatBedrock
         import boto3
 
-        # Build boto3 session — uses env vars or ~/.aws/credentials automatically
         session_kwargs: dict = {"region_name": settings.aws_region}
         if settings.aws_access_key_id:
             session_kwargs["aws_access_key_id"] = settings.aws_access_key_id
@@ -101,12 +111,11 @@ def _build_bedrock(model: str, temperature: float, max_tokens: int) -> BaseChatM
         boto_session = boto3.Session(**session_kwargs)
         bedrock_client = boto_session.client("bedrock-runtime")
 
-        # model_kwargs varies by model family
         model_kwargs: dict = {"temperature": temperature}
         if model.startswith("anthropic.") or model.startswith("amazon."):
             model_kwargs["max_tokens"] = max_tokens
         elif model.startswith("meta.") or model.startswith("mistral."):
-            model_kwargs["max_gen_len"] = max_tokens  # Llama/Mistral use max_gen_len
+            model_kwargs["max_gen_len"] = max_tokens
 
         return ChatBedrock(
             client=bedrock_client,
