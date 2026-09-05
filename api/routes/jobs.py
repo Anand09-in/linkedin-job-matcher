@@ -10,13 +10,14 @@ Phase 4.
 """
 from __future__ import annotations
 
+from datetime import date
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from loguru import logger
 
 from api.dependencies import get_repo
-from api.models import JobResponse, StatusUpdateRequest, StatusUpdateResponse
+from api.models import BulkDeleteResponse, JobResponse, StatusUpdateRequest, StatusUpdateResponse
 from db.models import Job
 from db.repository import AsyncJobRepository
 
@@ -57,6 +58,9 @@ async def list_jobs(
     # Match score filters
     min_score: Optional[float] = Query(None, ge=0.0, le=1.0, description="Minimum match score"),
     max_score: Optional[float] = Query(None, ge=0.0, le=1.0, description="Maximum match score"),
+    # Experience filters
+    min_experience: Optional[int] = Query(None, ge=0, description="Minimum required experience years"),
+    max_experience: Optional[int] = Query(None, ge=0, description="Maximum required experience years"),
     # Text filters
     company: Optional[str] = Query(None, description="Filter by company name (partial match)"),
     title: Optional[str] = Query(None, description="Filter by job title (partial match)"),
@@ -70,25 +74,34 @@ async def list_jobs(
     # Pagination
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
-    # Sorting
-    sort_by: str = Query("match_score", description="match_score | scraped_at | company | title | experience"),
+    # Sorting — comma-separated, applied in order: e.g. "match_score,experience"
+    sort_by: str = Query("match_score", description="Comma-separated: match_score,experience,scraped_at,company,title"),
     repo: AsyncJobRepository = Depends(get_repo),
 ):
     """
     List jobs with rich filtering and pagination.
 
     Results are sorted by match_score descending by default (nulls last).
+    Deleted jobs are excluded unless status=deleted is explicitly requested.
     """
     from sqlalchemy import select, or_
     from db.models import Job
 
     q = select(Job)
 
+    # Always exclude deleted jobs unless explicitly requested
+    if status != "deleted":
+        q = q.where(Job.status != "deleted")
+
     # Apply filters
     if min_score is not None:
         q = q.where(Job.match_score >= min_score)
     if max_score is not None:
         q = q.where(Job.match_score <= max_score)
+    if min_experience is not None:
+        q = q.where(Job.experience_years_min >= min_experience)
+    if max_experience is not None:
+        q = q.where((Job.experience_years_min <= max_experience) | Job.experience_years_min.is_(None))
     if company:
         q = q.where(Job.company.ilike(f"%{company}%"))
     if title:
@@ -110,8 +123,8 @@ async def list_jobs(
     if has_score is False:
         q = q.where(Job.match_score.is_(None))
 
-    # Apply sorting
-    from sqlalchemy import asc, desc, nullslast
+    # Apply multi-sort — comma-separated fields applied in order
+    from sqlalchemy import nullslast
     sort_map = {
         "match_score": nullslast(Job.match_score.desc()),
         "scraped_at":  Job.scraped_at.desc(),
@@ -119,19 +132,32 @@ async def list_jobs(
         "title":       Job.title.asc(),
         "experience":  nullslast(Job.experience_years_min.asc()),
     }
-    order_clause = sort_map.get(sort_by, nullslast(Job.match_score.desc()))
-    q = q.order_by(order_clause).limit(limit).offset(offset)
+    sort_fields = [s.strip() for s in sort_by.split(",") if s.strip() in sort_map]
+    order_clauses = [sort_map[f] for f in sort_fields] or [sort_map["match_score"]]
+    q = q.order_by(*order_clauses).limit(limit).offset(offset)
 
-    from db.database import get_db
-    from sqlalchemy.ext.asyncio import AsyncSession
-    from fastapi import Depends as _Depends
-
-    # Execute via the repo's session
     result = await repo._s.execute(q)
     jobs = result.scalars().all()
 
     logger.debug(f"[GET /jobs] filters applied → {len(jobs)} jobs returned")
     return [_job_to_response(j) for j in jobs]
+
+
+@router.delete("", response_model=BulkDeleteResponse)
+async def delete_jobs_before(
+    before_date: date = Query(..., description="Permanently delete jobs posted on or before this date (YYYY-MM-DD)"),
+    repo: AsyncJobRepository = Depends(get_repo),
+):
+    """
+    Permanently delete jobs whose date_posted is on or before before_date.
+
+    Unlike DELETE /jobs/{id} (a soft delete), this hard-deletes rows from the
+    database — used to flush out stale postings after a long gap between
+    scraping sessions. Cannot be undone.
+    """
+    deleted = await repo.delete_jobs_before(before_date)
+    logger.warning(f"[DELETE /jobs] before_date={before_date} → {deleted} jobs permanently deleted")
+    return BulkDeleteResponse(deleted_count=deleted, before_date=before_date.isoformat())
 
 
 @router.get("/stats", tags=["Jobs"])
@@ -173,6 +199,23 @@ async def get_job(
     if not job:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
     return _job_to_response(job)
+
+
+@router.delete("/{job_id}", status_code=204)
+async def delete_job(
+    job_id: str,
+    repo: AsyncJobRepository = Depends(get_repo),
+):
+    """
+    Soft-delete a job — sets status to 'deleted' so it's hidden from results
+    and skipped by the matching pipeline. The job record is kept in DB so it
+    won't be re-matched if it appears in a future scrape.
+    """
+    job = await repo.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
+    await repo.update_job_status(job_id, "deleted")
+    logger.info(f"[DELETE /jobs/{job_id}] marked as deleted")
 
 
 @router.patch("/{job_id}/status", response_model=StatusUpdateResponse)

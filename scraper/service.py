@@ -113,6 +113,10 @@ class ScraperService:
                 "3. Paste the value into your .env file"
             )
         os.environ["LI_AT_COOKIE"] = cookie
+        # Config.LI_AT_COOKIE is a class attr read at import time — patch it so
+        # LinkedinScraper picks up the cookie even when imported before _set_cookie runs
+        from linkedin_jobs_scraper.config import Config
+        Config.LI_AT_COOKIE = cookie
 
     def _build_queries(self) -> list[Query]:
         """Convert config.yaml query blocks into LinkedIn Query objects."""
@@ -205,6 +209,13 @@ class ScraperService:
 
     def _on_error(self, error: Exception) -> None:
         err_str = str(error).lower()
+
+        # Chrome 148+ raises InvalidArgumentException when the library tries to
+        # close certain CDP targets after data collection — non-fatal, skip it
+        if "doesn't support closing" in err_str or "target.closetarget" in err_str:
+            logger.debug(f"[SCRAPER] Chrome tab cleanup skipped (Chrome 148 compat): {str(error)[:80]}")
+            return
+
         is_rate_limit = any(kw in err_str for kw in ("429", "rate limit", "too many requests", "ratelimit"))
 
         with self._lock:

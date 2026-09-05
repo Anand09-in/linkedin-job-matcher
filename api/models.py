@@ -83,6 +83,11 @@ class StatusUpdateResponse(BaseModel):
     updated: bool
 
 
+class BulkDeleteResponse(BaseModel):
+    deleted_count: int
+    before_date: str
+
+
 # ── Resume ────────────────────────────────────────────────────────────────────
 
 class ResumeUploadResponse(BaseModel):

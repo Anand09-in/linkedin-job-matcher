@@ -89,18 +89,48 @@ def job_card(job: dict) -> str | None:
 
         # ── Action buttons ────────────────────────────────────────────────────
         action = None
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 2, 1])
+
+        _STATUS_LABELS = {
+            "saved":     "💾 Saved ✓",
+            "applied":   "✅ Applied ✓",
+            "interview": "🎤 Interview ✓",
+            "offer":     "🎉 Offer ✓",
+            "rejected":  "❌ Rejected ✓",
+        }
+
         with col1:
             if job.get("apply_link") or job.get("link"):
                 st.link_button("🔗 Apply", job.get("apply_link") or job.get("link", ""), use_container_width=True)
         with col2:
-            if st.button("💾 Save", key=f"save_{job['id']}", use_container_width=True):
+            is_saved = status == "saved"
+            if st.button(
+                _STATUS_LABELS["saved"] if is_saved else "💾 Save",
+                key=f"save_{job['id']}",
+                use_container_width=True,
+                disabled=is_saved,
+            ):
                 action = "saved"
         with col3:
-            if st.button("✅ Applied", key=f"applied_{job['id']}", use_container_width=True):
+            is_applied = status in ("applied", "interview", "offer")
+            if st.button(
+                _STATUS_LABELS.get(status, "✅ Applied") if is_applied else "✅ Applied",
+                key=f"applied_{job['id']}",
+                use_container_width=True,
+                disabled=is_applied,
+            ):
                 action = "applied"
         with col4:
-            if st.button("❌ Reject", key=f"reject_{job['id']}", use_container_width=True):
+            is_rejected = status == "rejected"
+            if st.button(
+                _STATUS_LABELS["rejected"] if is_rejected else "❌ Reject",
+                key=f"reject_{job['id']}",
+                use_container_width=True,
+                disabled=is_rejected,
+            ):
                 action = "rejected"
+        with col5:
+            if st.button("🗑️", key=f"delete_{job['id']}", use_container_width=True, help="Remove this job"):
+                action = "deleted"
 
     return action

@@ -20,18 +20,26 @@ from ui.components.job_card import job_card
 from ui.components.match_chart import score_breakdown_chart, score_distribution_chart
 
 
-_PAGE_SIZE = 10
+_PAGE_SIZE = 30
 
 
 def _apply_status_update(job_id: str, new_status: str) -> None:
     try:
-        api.update_job_status(job_id, new_status)
-        st.toast(f"Status updated → {new_status}", icon="✅")
-        # Bust the cached results so the card refreshes
-        if "scored_jobs" in st.session_state:
-            for j in st.session_state["scored_jobs"]:
-                if j["id"] == job_id:
-                    j["status"] = new_status
+        if new_status == "deleted":
+            api.delete_job(job_id)
+            st.toast("Job removed from results", icon="🗑️")
+            if st.session_state.get("scored_jobs"):
+                st.session_state["scored_jobs"] = [
+                    j for j in st.session_state["scored_jobs"] if j["id"] != job_id
+                ]
+        else:
+            api.update_job_status(job_id, new_status)
+            st.toast(f"Status updated → {new_status}", icon="✅")
+            if st.session_state.get("scored_jobs"):
+                for j in st.session_state["scored_jobs"]:
+                    if j["id"] == job_id:
+                        j["status"] = new_status
+        st.rerun()
     except RuntimeError as e:
         st.error(str(e))
 
@@ -52,6 +60,11 @@ def render() -> None:
 
         min_score_pct = st.slider("Min match score", 0, 100, 0, 5, format="%d%%")
         min_score = min_score_pct / 100
+
+        exp_range = st.slider("Experience required (yrs)", 0, 15, (0, 15), 1)
+        min_exp = exp_range[0] if exp_range[0] > 0 else None
+        max_exp = exp_range[1] if exp_range[1] < 15 else None
+
         company   = st.text_input("Company", placeholder="e.g. Google")
         title_f   = st.text_input("Job title", placeholder="e.g. ML Engineer")
         location  = st.text_input("Location", placeholder="e.g. Bangalore")
@@ -62,11 +75,16 @@ def render() -> None:
         remote = st.selectbox("Work mode", ["All", "Remote", "Hybrid", "On-site"])
         status = st.selectbox(
             "Application status",
-            ["All", "new", "saved", "applied", "interview", "offer", "rejected"]
+            ["New only", "All", "saved", "applied", "interview", "offer", "rejected"],
         )
         has_score = st.checkbox("Only matched jobs", value=True)
 
-        sort_by = st.selectbox("Sort by", ["match_score", "experience", "scraped_at", "company", "title"])
+        sort_by_list = st.multiselect(
+            "Sort by (ordered)",
+            ["match_score", "experience", "scraped_at", "company", "title"],
+            default=["match_score"],
+        )
+        sort_by = ",".join(sort_by_list) if sort_by_list else "match_score"
 
         st.divider()
         page = st.number_input("Page", min_value=1, value=1, step=1)
@@ -76,10 +94,12 @@ def render() -> None:
     try:
         jobs = api.list_jobs(
             min_score=min_score if min_score > 0 else None,
+            min_experience=min_exp,
+            max_experience=max_exp,
             company=company or None,
             title=title_f or None,
             location=location or None,
-            status=status if status != "All" else None,
+            status="new" if status == "New only" else (None if status == "All" else status),
             seniority=seniority if seniority != "All" else None,
             remote_policy=remote if remote != "All" else None,
             has_score=True if has_score else None,
@@ -117,6 +137,33 @@ def render() -> None:
                 f"http://localhost:8000/export/excel?has_score={str(has_score).lower()}&min_score={min_score if min_score > 0 else 0}",
                 use_container_width=True,
             )
+
+    # ── Bulk delete by posted date ────────────────────────────────────────────
+    with st.expander("🗑️ Flush old jobs (permanent)"):
+        st.caption(
+            "Permanently deletes jobs from the database whose **posted date** is "
+            "on or before the date you pick. This cannot be undone — use it to "
+            "clear out stale postings after a long gap between scraping runs."
+        )
+        dc1, dc2, dc3 = st.columns([2, 2, 2])
+        cutoff = dc1.date_input("Delete jobs posted on/before", value=None, key="bulk_delete_cutoff")
+        confirm = dc2.checkbox("I understand this is permanent", key="bulk_delete_confirm")
+        if dc3.button(
+            "Delete jobs",
+            type="primary",
+            disabled=not (cutoff and confirm),
+            use_container_width=True,
+        ):
+            try:
+                result = api.delete_jobs_before(cutoff.isoformat())
+                st.toast(
+                    f"Permanently deleted {result['deleted_count']} job(s) posted on/before {cutoff}",
+                    icon="🗑️",
+                )
+                st.session_state.pop("scored_jobs", None)
+                st.rerun()
+            except RuntimeError as e:
+                st.error(str(e))
 
     # ── Score distribution (from session state if available) ──────────────────
     all_jobs = st.session_state.get("scored_jobs", jobs)

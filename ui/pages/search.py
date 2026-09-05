@@ -29,6 +29,13 @@ def render() -> None:
         st.error(f"⚠️  {e}")
         st.stop()
 
+    # ── Scheduler status ──────────────────────────────────────────────────────
+    try:
+        sched = api.get_scheduler_status()
+        _render_scheduler_status(sched)
+    except RuntimeError:
+        pass   # scheduler status is non-critical, fail silently
+
     # ── Query builder ─────────────────────────────────────────────────────────
     st.subheader("Search Configuration")
 
@@ -146,3 +153,97 @@ def render() -> None:
                 col4.write(str(r.get("started_at",""))[:16])
     except RuntimeError as e:
         st.warning(str(e))
+
+
+def _render_scheduler_status(s: dict) -> None:
+    """Compact scheduler status panel shown above the query builder."""
+    if not s.get("enabled"):
+        return
+
+    from datetime import datetime, timezone
+
+    last  = s.get("last_run") or {}
+    nxt   = s.get("next_run")
+    hours = s.get("interval_hours", 12)
+    now   = datetime.now(timezone.utc)
+
+    # ── Format next run — absolute timestamp + relative in metric ────────────
+    if nxt:
+        try:
+            dt = datetime.fromisoformat(nxt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            delta_mins = int((dt - now).total_seconds() / 60)
+            if delta_mins <= 0:
+                nxt_label = "soon"
+            elif delta_mins < 60:
+                nxt_label = f"in {delta_mins}m"
+            else:
+                h, m = divmod(delta_mins, 60)
+                nxt_label = f"in {h}h {m}m"
+            nxt_full = dt.strftime("%d %b %Y, %H:%M UTC")
+        except Exception:
+            nxt_label = nxt[:16]
+            nxt_full  = nxt
+    else:
+        nxt_label = "—"
+        nxt_full  = "Scheduler not running"
+
+    # ── Format last run — relative time ("3h ago") + absolute in help ────────
+    last_status  = last.get("status", "never")
+    last_icon    = {"success": "✅", "failed": "❌", "running": "⏳"}.get(last_status, "—")
+    last_ran_str = last.get("ran_at") or ""
+    last_label   = "Never"
+    last_full    = "No runs recorded yet"
+
+    if last_ran_str:
+        try:
+            last_dt = datetime.fromisoformat(last_ran_str)
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=timezone.utc)
+            ago_mins = int((now - last_dt).total_seconds() / 60)
+            if ago_mins < 1:
+                last_label = "just now"
+            elif ago_mins < 60:
+                last_label = f"{ago_mins}m ago"
+            elif ago_mins < 1440:
+                last_label = f"{ago_mins // 60}h ago"
+            else:
+                last_label = f"{ago_mins // 1440}d ago"
+            last_full = last_dt.strftime("%d %b %Y, %H:%M UTC")
+        except Exception:
+            last_label = last_ran_str[:10]
+            last_full  = last_ran_str
+
+    with st.container(border=True):
+        st.caption("🕐 Auto-Scrape Scheduler")
+        c1, c2, c3, c4 = st.columns(4)
+
+        c1.metric(
+            "Next scrape",
+            nxt_label,
+            help=nxt_full,
+        )
+        c2.metric("Interval", f"Every {hours}h")
+        c3.metric(
+            "Last run",
+            f"{last_icon} {last_label}" if last_ran_str else "—  Never",
+            help=f"{last_full}  ·  status: {last_status}",
+        )
+        if last_status == "success":
+            c4.metric(
+                "Jobs found",
+                f"+{last.get('jobs_new', 0)} new",
+                delta=f"{last.get('jobs_updated', 0)} updated",
+                delta_color="off",
+            )
+        elif last_status == "failed":
+            c4.markdown(
+                f"<span style='color:#ef4444;font-size:0.8rem;'>"
+                f"⚠️ {(last.get('error') or 'unknown error')[:80]}</span>",
+                unsafe_allow_html=True,
+            )
+        elif last_status == "running":
+            c4.markdown("⏳ Scrape in progress…")
+        else:
+            c4.metric("Jobs found", "—")

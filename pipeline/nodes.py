@@ -27,6 +27,8 @@ from __future__ import annotations
 import concurrent.futures
 from typing import Any
 
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
 from loguru import logger
 from sqlalchemy import create_engine, func, or_, select
 from sqlalchemy.orm import sessionmaker
@@ -70,6 +72,7 @@ def scraper_node(state: PipelineState) -> dict:
         with Session() as session:
             # Only load jobs that need scoring:
             #   - never scored, OR scored with a different resume
+            #   - exclude deleted jobs (user dismissed them)
             needs_scoring = session.execute(
                 select(Job).where(
                     or_(
@@ -77,7 +80,8 @@ def scraper_node(state: PipelineState) -> dict:
                         Job.scored_with_resume_id.is_(None),
                         Job.scored_with_resume_id != resume_id,
                     )
-                ).order_by(Job.scraped_at.desc())
+                ).where(Job.status != "deleted")
+                .order_by(Job.scraped_at.desc())
             ).scalars().all()
 
             total = session.execute(select(func.count(Job.id))).scalar()
@@ -132,6 +136,15 @@ def jd_parser_node(state: PipelineState) -> dict:
     llm = get_llm()
     parser = JDParser(llm=llm)
 
+    @retry(
+        retry=retry_if_exception_type(Exception),
+        wait=wait_exponential(multiplier=2, min=4, max=60),
+        stop=stop_after_attempt(5),
+        reraise=True,
+    )
+    def _parse_with_retry(description: str):
+        return parser.parse(description)
+
     def parse_one(job: dict) -> dict:
         """Parse a single job's description and return enriched job dict."""
         description = job.get("description") or ""
@@ -139,7 +152,7 @@ def jd_parser_node(state: PipelineState) -> dict:
             logger.warning(f"[jd_parser_node] No description for job {job.get('id')}")
             return job
 
-        parsed = parser.parse(description)
+        parsed = _parse_with_retry(description)
         enriched = {
             **job,
             "skills_required": parsed.skills_required,
@@ -163,9 +176,10 @@ def jd_parser_node(state: PipelineState) -> dict:
 
         return enriched
 
-    # Concurrent parsing — max 4 workers (respects LLM rate limits reasonably)
+    # Sequential parsing (max_workers=1) to avoid Bedrock ThrottlingException.
+    # Tenacity retries with exponential backoff handle transient throttles.
     parsed_new: list[dict] = []
-    max_workers = min(4, len(to_parse))
+    max_workers = 1
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(parse_one, job): job for job in to_parse}
         for future in concurrent.futures.as_completed(futures):
@@ -296,6 +310,19 @@ def matcher_node(state: PipelineState) -> dict:
     if not parsed_jobs:
         logger.warning("[matcher_node] No parsed jobs to score")
         return {"scored_jobs": [], "skill_gaps": [], "errors": errors}
+
+    # Filter out jobs that exceed the configured experience ceiling
+    from config.settings import get_settings as _get_settings
+    _max_exp = _get_settings().yaml_config.get("matching", {}).get("max_experience_years")
+    if _max_exp is not None:
+        before = len(parsed_jobs)
+        parsed_jobs = [
+            j for j in parsed_jobs
+            if (j.get("experience_years_min") or 0) <= _max_exp
+        ]
+        filtered = before - len(parsed_jobs)
+        if filtered:
+            logger.info(f"[matcher_node] Skipped {filtered} jobs exceeding {_max_exp} yrs experience")
 
     if not candidate_profile:
         msg = "matcher_node: candidate_profile is empty — resume may not have parsed correctly"

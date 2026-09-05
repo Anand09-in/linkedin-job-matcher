@@ -105,6 +105,13 @@ async def trigger_scrape(
     )
 
 
+@router.get("/scheduler-status")
+async def scheduler_status():
+    """Return current scheduler state: enabled, next run time, last run result."""
+    from api.scheduler import get_status
+    return get_status()
+
+
 @router.get("/runs", response_model=list[ScrapeStatusResponse])
 async def list_scrape_runs(
     limit: int = Query(10, ge=1, le=50),

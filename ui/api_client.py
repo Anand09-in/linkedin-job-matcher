@@ -71,6 +71,35 @@ def _post_with_params(path: str, params: dict | None = None, json: dict | None =
         raise RuntimeError(f"API error {e.response.status_code}: {detail}")
 
 
+def _delete(path: str) -> None:
+    try:
+        r = _CLIENT.delete(f"{BASE_URL}{path}", follow_redirects=True)
+        r.raise_for_status()
+    except httpx.ConnectError:
+        raise RuntimeError("Cannot connect to API.")
+    except httpx.HTTPStatusError as e:
+        try:
+            detail = e.response.json().get("detail", str(e))
+        except Exception:
+            detail = e.response.text or str(e)
+        raise RuntimeError(f"API error {e.response.status_code}: {detail}")
+
+
+def _delete_with_params(path: str, params: dict) -> dict:
+    try:
+        r = _CLIENT.delete(f"{BASE_URL}{path}", params=params, follow_redirects=True)
+        r.raise_for_status()
+        return r.json()
+    except httpx.ConnectError:
+        raise RuntimeError("Cannot connect to API.")
+    except httpx.HTTPStatusError as e:
+        try:
+            detail = e.response.json().get("detail", str(e))
+        except Exception:
+            detail = e.response.text or str(e)
+        raise RuntimeError(f"API error {e.response.status_code}: {detail}")
+
+
 def _patch(path: str, json: dict) -> dict:
     try:
         r = _CLIENT.patch(f"{BASE_URL}{path}", json=json, follow_redirects=True)
@@ -107,6 +136,11 @@ def get_scrape_status(run_id: str) -> dict:
     return _get(f"/scrape/{run_id}")
 
 
+def get_scheduler_status() -> dict:
+    """GET /scrape/scheduler-status"""
+    return _get("/scrape/scheduler-status")
+
+
 def list_scrape_runs(limit: int = 10) -> list:
     """GET /scrape/runs"""
     return _get("/scrape/runs", params={"limit": limit})
@@ -139,6 +173,8 @@ def get_active_resume() -> dict | None:
 def list_jobs(
     min_score: Optional[float] = None,
     max_score: Optional[float] = None,
+    min_experience: Optional[int] = None,
+    max_experience: Optional[int] = None,
     company: Optional[str] = None,
     title: Optional[str] = None,
     location: Optional[str] = None,
@@ -147,22 +183,36 @@ def list_jobs(
     remote_policy: Optional[str] = None,
     has_description: Optional[bool] = None,
     has_score: Optional[bool] = None,
-    sort_by: str = "match_score",
+    sort_by: "str | list[str]" = "match_score",
     limit: int = 100,
     offset: int = 0,
 ) -> list[dict]:
+    if isinstance(sort_by, list):
+        sort_by = ",".join(sort_by)
     params = {"sort_by": sort_by, "limit": limit, "offset": offset}
-    if min_score  is not None: params["min_score"]      = min_score
-    if max_score  is not None: params["max_score"]      = max_score
-    if company:                params["company"]        = company
-    if title:                  params["title"]          = title
-    if location:               params["location"]       = location
-    if status:                 params["status"]         = status
-    if seniority:              params["seniority"]      = seniority
-    if remote_policy:          params["remote_policy"]  = remote_policy
+    if min_score      is not None: params["min_score"]       = min_score
+    if max_score      is not None: params["max_score"]       = max_score
+    if min_experience is not None: params["min_experience"]  = min_experience
+    if max_experience is not None: params["max_experience"]  = max_experience
+    if company:                    params["company"]         = company
+    if title:                      params["title"]           = title
+    if location:                   params["location"]        = location
+    if status:                     params["status"]          = status
+    if seniority:                  params["seniority"]       = seniority
+    if remote_policy:              params["remote_policy"]   = remote_policy
     if has_description is not None: params["has_description"] = has_description
-    if has_score is not None:  params["has_score"]      = has_score
+    if has_score is not None:      params["has_score"]       = has_score
     return _get("/jobs", params=params)
+
+
+def delete_job(job_id: str) -> None:
+    """DELETE /jobs/{id} — soft-deletes a job (hides from results, skipped by pipeline)"""
+    _delete(f"/jobs/{job_id}")
+
+
+def delete_jobs_before(before_date: str) -> dict:
+    """DELETE /jobs?before_date=YYYY-MM-DD — permanently deletes jobs posted on/before that date."""
+    return _delete_with_params("/jobs", params={"before_date": before_date})
 
 
 def get_job(job_id: str) -> dict:

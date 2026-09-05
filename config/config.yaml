@@ -9,17 +9,22 @@ scraper:
   headless: true
 
 queries:
-  - query: "Machine Learning Engineer"
+  - query: "Data Engineer with less than 2 yrs of experience"
     locations:
       - "Bangalore, India"
       - "Mumbai, India"
       - "Pune, India"
-    limit: 50
+      - "Hyderabad, India"
+      - "Noida, India"
+    limit: 60
     filters:
       relevance: RECENT
-      time: MONTH
+      time: WEEK
       type:
         - FULL_TIME
+      experience:
+        - ENTRY_LEVEL
+        - ASSOCIATE
 
 llm:
   provider: "${LLM_PROVIDER}"
@@ -35,6 +40,9 @@ matching:
     experience_match: 0.15
     title_match: 0.10
   min_score_threshold: 0.40
+  # Jobs requiring more than this many years of experience are skipped during matching.
+  # Set to null to disable. Example: 3 discards jobs needing 4+ years.
+  max_experience_years: 3
 
 features:
   cover_letter: true

@@ -9,11 +9,11 @@ Phase 1 + Phase 3.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 from loguru import logger
-from sqlalchemy import create_engine, select, update
+from sqlalchemy import create_engine, delete, func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -189,6 +189,33 @@ class AsyncJobRepository:
         )
         await self._s.commit()
         return result.rowcount > 0
+
+    async def delete_job(self, job_id: str) -> bool:
+        result = await self._s.execute(
+            update(Job).where(Job.id == job_id).values(status="deleted", updated_at=datetime.utcnow())
+        )
+        await self._s.commit()
+        return result.rowcount > 0
+
+    async def delete_jobs_before(self, cutoff: date) -> int:
+        """
+        Permanently delete jobs whose date_posted (the LinkedIn listing date,
+        stored as an ISO string like "2026-08-20") falls on or before cutoff.
+
+        date_posted is free-text (Phase 1 schema) rather than a real Date
+        column, so we compare on its first 10 chars — the date portion — and
+        skip rows where it's missing/unparsed instead of guessing.
+        """
+        cutoff_str = cutoff.isoformat()
+        result = await self._s.execute(
+            delete(Job).where(
+                Job.date_posted.isnot(None),
+                Job.date_posted != "",
+                func.substr(Job.date_posted, 1, 10) <= cutoff_str,
+            )
+        )
+        await self._s.commit()
+        return result.rowcount or 0
 
     async def save_resume(self, filename: str, raw_text: str) -> str:
         """Deactivate all previous resumes and save a new active one."""

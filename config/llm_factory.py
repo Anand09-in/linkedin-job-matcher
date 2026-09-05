@@ -95,12 +95,12 @@ def _build_bedrock(model: str, temperature: float, max_tokens: int) -> BaseChatM
             f"Bedrock model '{model}' does not support the chat API format. "
             f"Use a chat-compatible model instead: "
             f"anthropic.claude-3-haiku-20240307-v1:0 | "
-            f"meta.llama3-70b-instruct-v1:0 | "
+            f"mistral.mistral-large-3-675b-instruct "
             f"mistral.mistral-large-2402-v1:0"
         )
 
     try:
-        from langchain_aws import ChatBedrock
+        from langchain_aws import ChatBedrockConverse
         import boto3
 
         session_kwargs: dict = {"region_name": settings.aws_region}
@@ -111,16 +111,14 @@ def _build_bedrock(model: str, temperature: float, max_tokens: int) -> BaseChatM
         boto_session = boto3.Session(**session_kwargs)
         bedrock_client = boto_session.client("bedrock-runtime")
 
-        model_kwargs: dict = {"temperature": temperature}
-        if model.startswith("anthropic.") or model.startswith("amazon."):
-            model_kwargs["max_tokens"] = max_tokens
-        elif model.startswith("meta.") or model.startswith("mistral."):
-            model_kwargs["max_gen_len"] = max_tokens
-
-        return ChatBedrock(
+        # Converse API normalizes the request/response shape across all
+        # Bedrock providers (Anthropic, Meta, Mistral, Amazon, …), so no
+        # per-provider max_tokens/max_gen_len branching is needed here.
+        return ChatBedrockConverse(
             client=bedrock_client,
             model_id=model,
-            model_kwargs=model_kwargs,
+            temperature=temperature,
+            max_tokens=max_tokens,
         )
     except ImportError:
         raise ImportError("Run: pip install langchain-aws boto3")
