@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from loguru import logger
 
 from api.dependencies import get_repo
-from api.models import BulkDeleteResponse, JobResponse, StatusUpdateRequest, StatusUpdateResponse
+from api.models import BulkDeleteResponse, JobCountResponse, JobResponse, StatusUpdateRequest, StatusUpdateResponse
 from db.models import Job
 from db.repository import AsyncJobRepository
 
@@ -187,6 +187,16 @@ async def job_stats(repo: AsyncJobRepository = Depends(get_repo)):
         "with_match_score": with_score.scalar(),
         "avg_match_score": round(avg_score.scalar() or 0, 3),
     }
+
+
+@router.get("/count-before", response_model=JobCountResponse)
+async def count_jobs_before(
+    before_date: date = Query(..., description="Count jobs posted on or before this date (YYYY-MM-DD)"),
+    repo: AsyncJobRepository = Depends(get_repo),
+):
+    """Preview how many jobs DELETE /jobs?before_date=... would remove, without deleting anything."""
+    count = await repo.count_jobs_before(before_date)
+    return JobCountResponse(count=count, before_date=before_date.isoformat())
 
 
 @router.get("/{job_id}", response_model=JobResponse)

@@ -13,7 +13,7 @@ from datetime import date, datetime
 from typing import Optional
 
 from loguru import logger
-from sqlalchemy import create_engine, delete, func, select, update
+from sqlalchemy import and_, create_engine, delete, func, or_, select, update
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -197,23 +197,35 @@ class AsyncJobRepository:
         await self._s.commit()
         return result.rowcount > 0
 
-    async def delete_jobs_before(self, cutoff: date) -> int:
+    @staticmethod
+    def _before_cutoff_clause(cutoff: date):
         """
-        Permanently delete jobs whose date_posted (the LinkedIn listing date,
-        stored as an ISO string like "2026-08-20") falls on or before cutoff.
+        Build the "job is on/before cutoff" condition shared by count_jobs_before
+        and delete_jobs_before.
 
-        date_posted is free-text (Phase 1 schema) rather than a real Date
-        column, so we compare on its first 10 chars — the date portion — and
-        skip rows where it's missing/unparsed instead of guessing.
+        Prefers date_posted (the LinkedIn listing date, stored as an ISO string
+        like "2026-08-20" — compared on its first 10 chars since the column is
+        free-text). Many jobs currently have it empty (a scraper capture gap),
+        so those fall back to scraped_at (when the job was pulled into the DB)
+        instead of being silently excluded from the flush.
         """
         cutoff_str = cutoff.isoformat()
-        result = await self._s.execute(
-            delete(Job).where(
-                Job.date_posted.isnot(None),
-                Job.date_posted != "",
-                func.substr(Job.date_posted, 1, 10) <= cutoff_str,
-            )
+        has_posted_date = and_(Job.date_posted.isnot(None), Job.date_posted != "")
+        return or_(
+            and_(has_posted_date, func.substr(Job.date_posted, 1, 10) <= cutoff_str),
+            and_(~has_posted_date, func.date(Job.scraped_at) <= cutoff_str),
         )
+
+    async def count_jobs_before(self, cutoff: date) -> int:
+        """Count jobs that delete_jobs_before(cutoff) would remove, without deleting them."""
+        result = await self._s.execute(
+            select(func.count(Job.id)).where(self._before_cutoff_clause(cutoff))
+        )
+        return result.scalar() or 0
+
+    async def delete_jobs_before(self, cutoff: date) -> int:
+        """Permanently delete jobs matching _before_cutoff_clause(cutoff). See its docstring."""
+        result = await self._s.execute(delete(Job).where(self._before_cutoff_clause(cutoff)))
         await self._s.commit()
         return result.rowcount or 0
 

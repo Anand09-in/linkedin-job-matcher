@@ -215,6 +215,11 @@ def delete_jobs_before(before_date: str) -> dict:
     return _delete_with_params("/jobs", params={"before_date": before_date})
 
 
+def count_jobs_before(before_date: str) -> dict:
+    """GET /jobs/count-before?before_date=YYYY-MM-DD — preview count without deleting."""
+    return _get("/jobs/count-before", params={"before_date": before_date})
+
+
 def get_job(job_id: str) -> dict:
     return _get(f"/jobs/{job_id}")
 

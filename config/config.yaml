@@ -9,7 +9,7 @@ scraper:
   headless: true
 
 queries:
-  - query: "Data Engineer with less than 2 yrs of experience"
+  - query: "AI / ML Engineer with less than 2 yrs of experience"
     locations:
       - "Bangalore, India"
       - "Mumbai, India"
@@ -42,7 +42,7 @@ matching:
   min_score_threshold: 0.40
   # Jobs requiring more than this many years of experience are skipped during matching.
   # Set to null to disable. Example: 3 discards jobs needing 4+ years.
-  max_experience_years: 3
+  max_experience_years: 2
 
 features:
   cover_letter: true

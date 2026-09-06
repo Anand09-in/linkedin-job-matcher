@@ -88,6 +88,11 @@ class BulkDeleteResponse(BaseModel):
     before_date: str
 
 
+class JobCountResponse(BaseModel):
+    count: int
+    before_date: str
+
+
 # ── Resume ────────────────────────────────────────────────────────────────────
 
 class ResumeUploadResponse(BaseModel):

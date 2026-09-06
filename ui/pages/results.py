@@ -141,13 +141,30 @@ def render() -> None:
     # ── Bulk delete by posted date ────────────────────────────────────────────
     with st.expander("🗑️ Flush old jobs (permanent)"):
         st.caption(
-            "Permanently deletes jobs from the database whose **posted date** is "
-            "on or before the date you pick. This cannot be undone — use it to "
-            "clear out stale postings after a long gap between scraping runs."
+            "Permanently deletes jobs from the database posted on or before the "
+            "date you pick (falls back to the date it was scraped if the listing "
+            "has no posted date). This cannot be undone — use it to clear out "
+            "stale postings after a long gap between scraping runs."
         )
         dc1, dc2, dc3 = st.columns([2, 2, 2])
         cutoff = dc1.date_input("Delete jobs posted on/before", value=None, key="bulk_delete_cutoff")
-        confirm = dc2.checkbox("I understand this is permanent", key="bulk_delete_confirm")
+
+        preview_count = None
+        if cutoff:
+            try:
+                preview_count = api.count_jobs_before(cutoff.isoformat())["count"]
+            except RuntimeError as e:
+                st.error(str(e))
+
+        if preview_count is not None:
+            if preview_count == 0:
+                st.info(f"No jobs posted on/before {cutoff} — nothing to delete.")
+            else:
+                st.warning(f"⚠️ This will permanently delete **{preview_count}** job(s) posted on/before {cutoff}.")
+
+        confirm = dc2.checkbox(
+            "I understand this is permanent", key="bulk_delete_confirm", disabled=not preview_count
+        )
         if dc3.button(
             "Delete jobs",
             type="primary",
