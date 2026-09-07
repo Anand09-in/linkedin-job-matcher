@@ -60,24 +60,6 @@ class SystemPing(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-class ScrapeDebugBatch(Base):
-    """
-    Phase 2 wiring-check table — same spirit as SystemPing: proves a real
-    adapter run (worker -> Playwright/site -> Redis -> Postgres) produces
-    correct raw batches, WITHOUT touching the real Job table (that's Phase
-    3's job: extraction+filtering decides what becomes a Job). Removed once
-    Phase 3's real scrape_service.py lands.
-    """
-
-    __tablename__ = "scrape_debug_batches"
-
-    id: Mapped[uuid.UUID] = _uuid_pk()
-    pipeline_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
-    batch_index: Mapped[int] = mapped_column(Integer, nullable=False)
-    jobs: Mapped[list] = mapped_column(JSONB, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Resume — FR-1A.2: multiple, no "active" flag
 # ─────────────────────────────────────────────────────────────────────────────

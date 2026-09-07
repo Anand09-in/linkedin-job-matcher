@@ -20,9 +20,18 @@ client — extraction+matching (llm_tasks/batch_extract.py), salary synthesis
 (services/salary_service.py), and every on-demand feature all call get_llm()
 here. Phase 5 adds reading the active model from the DB LLM_SETTING row
 instead of only the env var; Phase 0 only needs the provider mechanics.
+
+`llm_semaphore` (system-design.md §2.3) caps concurrent in-flight Bedrock
+calls across ALL pipelines in this worker process — sequential within one
+pipeline's own scrape loop already happens naturally (analyze_batch is
+awaited one batch at a time), so this only matters once two pipelines run
+concurrently. Every call site (analyze_batch now; salary synthesis and
+on-demand features later) is expected to `async with llm_semaphore:` around
+its actual `.invoke()`/`.ainvoke()` call, not around get_llm() itself.
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Optional
 
 from langchain_core.language_models import BaseChatModel
@@ -31,6 +40,8 @@ from loguru import logger
 from app.core.config import get_settings
 
 settings = get_settings()
+
+llm_semaphore = asyncio.Semaphore(settings.llm_max_concurrent_calls)
 
 _NO_CHAT_PREFIXES = ("google.", "amazon.titan-text", "cohere.command-text")
 

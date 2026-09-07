@@ -251,10 +251,17 @@ class JobAnalysisResult(BaseModel):
     remote_policy: str | None
     education_required: str | None
     salary_hint: str | None
-    match_score: float                 # 0..1, LLM's assessment
+    # Optional, not a plain float — a Phase 3 implementation refinement over
+    # this original sketch: FR-2.6 pipelines have no resume bound and run
+    # extract-only, where there's no meaningful score. 0.0 would be
+    # indistinguishable from "scored, and it's a bad fit"; None means "not
+    # scored" unambiguously. analyze_batch() enforces this deterministically
+    # (forces these fields to None/empty when no resume was given) rather
+    # than trusting the LLM to have followed the "don't score" instruction.
+    match_score: float | None          # 0..1, LLM's assessment, or None if no resume
     matched_skills: list[str]
     missing_skills: list[str]
-    match_rationale: str
+    match_rationale: str | None
 
 class BatchJobAnalysis(BaseModel):
     results: list[JobAnalysisResult]
@@ -265,7 +272,7 @@ async def analyze_batch(
 ) -> BatchJobAnalysis: ...
 
 # services/scrape_service.py
-async def run_scrape(pipeline: Pipeline) -> ScrapeRunResult:
+async def run_scrape_pipeline(repo: Repository, pipeline: Pipeline) -> dict:
     """
     resume = await repo.get_resume(pipeline.resume_id) if pipeline.resume_id else None
     thresholds = pipeline.effective_thresholds()   # override, else system default

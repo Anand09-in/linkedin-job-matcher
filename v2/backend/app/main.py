@@ -10,18 +10,21 @@ Phase 1+ add app/api/routes/{jobs,scrape,resumes,pipelines,features,settings}.py
 """
 from __future__ import annotations
 
+import uuid
 from contextlib import asynccontextmanager
+from typing import Optional
 
 from arq import create_pool
 from arq.connections import RedisSettings
 from fastapi import FastAPI
 from loguru import logger
+from pydantic import BaseModel
 from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.domain.db import AsyncSessionLocal, check_db_connection
-from app.domain.models import ScrapeDebugBatch, SystemPing
+from app.domain.models import SystemPing
 from app.domain.repository import Repository
 
 settings = get_settings()
@@ -87,8 +90,26 @@ async def ping_log(limit: int = 10):
         return [{"id": r.id, "message": r.message, "created_at": r.created_at.isoformat()} for r in rows]
 
 
-# ── Phase 2 smoke-test endpoints — remove once Phase 3's real scrape trigger
-#    and Phase 7's real /pipelines CRUD exist ──────────────────────────────────
+# ── Debug/manual-test endpoints — remain until Phase 7 builds the real
+#    /pipelines, /resumes, /scrape, /jobs REST surface with proper request/
+#    response models, auth-ready shape, etc. These exist ONLY so each phase
+#    could be exercised manually against real Postgres/Redis/LinkedIn/Bedrock
+#    without waiting for Phase 7. ──────────────────────────────────────────────
+
+class QuickResumeRequest(BaseModel):
+    name: str
+    raw_text: str
+
+
+@app.post("/debug/quick-resume", include_in_schema=False)
+async def create_quick_resume(body: QuickResumeRequest):
+    """Create a minimal Resume for manual testing — Phase 7 replaces this
+    with a real POST /resumes (PDF upload + parsing, api/routes/resumes.py)."""
+    async with AsyncSessionLocal() as session:
+        repo = Repository(session)
+        resume = await repo.create_resume(name=body.name, filename=f"{body.name}.txt", raw_text=body.raw_text)
+        return {"resume_id": str(resume.id), "name": resume.name}
+
 
 @app.post("/debug/quick-pipeline", include_in_schema=False)
 async def create_quick_pipeline(
@@ -97,9 +118,12 @@ async def create_quick_pipeline(
     site: str = "linkedin",
     locations: str = "",
     batch_size: int = 5,
+    resume_id: Optional[str] = None,
+    min_match_score_override: Optional[float] = None,
+    max_experience_years_override: Optional[int] = None,
 ):
-    """Create a minimal Pipeline for manual Phase 2 testing — Phase 7 replaces
-    this with a real POST /pipelines endpoint (with resume binding, filters, etc).
+    """Create a minimal Pipeline for manual testing — Phase 7 replaces this
+    with a real POST /pipelines endpoint.
 
     `locations` is semicolon-separated, NOT comma-separated: a single location
     like "Bangalore, India" already contains a comma, so splitting on "," was
@@ -115,30 +139,83 @@ async def create_quick_pipeline(
             query=query,
             locations=[loc.strip() for loc in locations.split(";") if loc.strip()],
             batch_size=batch_size,
+            resume_id=uuid.UUID(resume_id) if resume_id else None,
+            min_match_score_override=min_match_score_override,
+            max_experience_years_override=max_experience_years_override,
         )
-        return {"pipeline_id": str(pipeline.id), "name": pipeline.name, "site": pipeline.site}
+        return {
+            "pipeline_id": str(pipeline.id), "name": pipeline.name, "site": pipeline.site,
+            "resume_id": str(pipeline.resume_id) if pipeline.resume_id else None,
+        }
 
 
-@app.post("/debug/scrape-preview", include_in_schema=False)
-async def trigger_scrape_preview(pipeline_id: str, limit: int = 50):
-    """Enqueues run_scrape_preview_task; GET /debug/scrape-preview-log confirms
-    real batches landed in Postgres (Phase 2 exit criterion). Requires
-    LI_AT_COOKIE set in .env for site=linkedin pipelines."""
-    job = await app.state.redis.enqueue_job("run_scrape_preview_task", pipeline_id, limit)
+@app.post("/debug/scrape", include_in_schema=False)
+async def trigger_scrape(pipeline_id: str, limit: Optional[int] = None):
+    """Enqueues run_scrape_task — the real Phase 3 pipeline: scrape ->
+    extract+match (one LLM call per batch) -> deterministic filter -> save.
+    GET /debug/jobs, /debug/rejected-jobs, /debug/scrape-runs inspect the
+    result. Requires LI_AT_COOKIE in .env for site=linkedin pipelines."""
+    job = await app.state.redis.enqueue_job("run_scrape_task", pipeline_id, limit)
     return {"enqueued": True, "job_id": job.job_id}
 
 
-@app.get("/debug/scrape-preview-log", include_in_schema=False)
-async def scrape_preview_log(pipeline_id: str, limit: int = 10):
+@app.get("/debug/jobs", include_in_schema=False)
+async def debug_list_jobs(pipeline_id: Optional[str] = None, limit: int = 20):
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(ScrapeDebugBatch)
-            .where(ScrapeDebugBatch.pipeline_id == pipeline_id)
-            .order_by(ScrapeDebugBatch.batch_index.asc())
-            .limit(limit)
+        repo = Repository(session)
+        jobs = await repo.list_jobs(
+            pipeline_id=uuid.UUID(pipeline_id) if pipeline_id else None, limit=limit
         )
-        rows = result.scalars().all()
         return [
-            {"batch_index": r.batch_index, "job_count": len(r.jobs), "jobs": r.jobs}
-            for r in rows
+            {
+                "id": str(j.id),
+                "title": j.title,
+                "company": j.company,
+                "location": j.location,
+                "match_score": j.match_score,
+                "matched_skills": j.matched_skills,
+                "missing_skills": j.missing_skills,
+                "skills_required": j.skills_required,
+                "seniority_level": j.seniority_level,
+                "employment_type": j.employment_type,
+                "remote_policy": j.remote_policy,
+                "experience_years_min": j.experience_years_min,
+                "match_rationale": j.match_rationale,
+                "date_posted": j.date_posted.isoformat() if j.date_posted else None,
+                "link": j.link,
+            }
+            for j in jobs
+        ]
+
+
+@app.get("/debug/rejected-jobs", include_in_schema=False)
+async def debug_list_rejected_jobs(pipeline_id: Optional[str] = None, limit: int = 20):
+    async with AsyncSessionLocal() as session:
+        repo = Repository(session)
+        rejected = await repo.list_rejected_jobs(
+            pipeline_id=uuid.UUID(pipeline_id) if pipeline_id else None, limit=limit
+        )
+        return [
+            {"title": r.title, "company": r.company, "match_score": r.match_score, "reason": r.reason, "link": r.link}
+            for r in rejected
+        ]
+
+
+@app.get("/debug/scrape-runs", include_in_schema=False)
+async def debug_list_scrape_runs(pipeline_id: str, limit: int = 10):
+    async with AsyncSessionLocal() as session:
+        repo = Repository(session)
+        runs = await repo.list_scrape_runs(pipeline_id=uuid.UUID(pipeline_id), limit=limit)
+        return [
+            {
+                "id": str(r.id),
+                "status": r.status,
+                "jobs_seen": r.jobs_seen,
+                "jobs_saved": r.jobs_saved,
+                "jobs_rejected": r.jobs_rejected,
+                "errors": r.errors,
+                "started_at": r.started_at.isoformat(),
+                "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+            }
+            for r in runs
         ]

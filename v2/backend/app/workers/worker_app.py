@@ -15,7 +15,7 @@ from loguru import logger
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.scrapers.bootstrap import bootstrap as bootstrap_scrapers
-from app.workers.tasks import ping_task, run_scrape_preview_task
+from app.workers.tasks import ping_task, run_scrape_task
 
 settings = get_settings()
 
@@ -31,9 +31,14 @@ async def on_shutdown(ctx):
 
 
 class WorkerSettings:
-    functions = [ping_task, run_scrape_preview_task]
+    functions = [ping_task, run_scrape_task]
     on_startup = on_startup
     on_shutdown = on_shutdown
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
-    # Phase 3/4 add: run_scrape_task, salary_lookup_task, and cron jobs here
-    # for pipelines with a schedule_cron set (system-design.md, architecture.md §3.2).
+    # A full scrape run (real browser navigation + click-through per job +
+    # an LLM call per batch) can run well past arq's 300s default job
+    # timeout for anything but a tiny `limit` — 30 minutes covers a
+    # realistic full-size run without masking a genuinely hung job forever.
+    job_timeout = 1800
+    # Phase 4 adds: salary_lookup_task, and cron jobs here for pipelines with
+    # a schedule_cron set (system-design.md, architecture.md §3.2).

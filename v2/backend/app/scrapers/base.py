@@ -40,10 +40,10 @@ class RawJob(BaseModel):
     # it silently ended up empty for every job with no way to tell why.
     date_posted_raw: str | None = None
     date_posted: datetime | None = None
-    # Sponsored/ad listings on some sites (confirmed on LinkedIn) carry no
-    # posted-date at all, unlike organic postings — surfaced explicitly so a
-    # missing date_posted reads as "this is a promoted listing, expected"
-    # rather than looking like an extraction failure.
+    # Sponsored/ad listings on some sites carry no posted-date at all, unlike
+    # organic postings — surfaced explicitly so a missing date_posted reads
+    # as "this is a promoted listing, expected" rather than looking like an
+    # extraction failure.
     is_promoted: bool = False
 
 

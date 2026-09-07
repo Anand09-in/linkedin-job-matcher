@@ -5,19 +5,98 @@ plan, and the other docs it links to ([functional-requirements.md](docs/function
 [architecture.md](docs/architecture.md), [system-design.md](docs/system-design.md),
 [flow-diagrams.md](docs/flow-diagrams.md)) for the full design.
 
-**Status:** Phase 2 (Universal scraper framework) complete AND validated
-against real, live LinkedIn (not just fixtures) — real jobs with full
-descriptions were pulled successfully. `BaseScraper` + `RawJob`/`ScrapeConfig`
-interface, a registry with zero site-specific mentions (mechanically checked
-by a test), a real Playwright-based LinkedIn adapter that owns its DOM
-selectors directly, and a trivial second ("testsite") adapter proving the
-framework generalizes. No LLM extraction/filtering/matching yet, and nothing
-is saved as a real `Job` yet — that's Phase 3. Job scraping/matching still
-lives in the v1 code at the repo root until cutover.
+**Status:** Phase 3 (Batch extraction, deterministic filter, and save)
+complete. The core single-step pipeline now runs for real: scrape -> one
+structured-output Bedrock call per batch (extraction + match assessment) ->
+deterministic threshold filter -> save as a real `Job` row (or a lightweight
+`RejectedJob` audit row if it doesn't pass). No separate "run matching" step
+exists — `services/scrape_service.py` is the whole thing. Job
+scraping/matching still lives in the v1 code at the repo root until cutover.
+
+Phase 2 (Universal scraper framework) is complete and was validated against
+real, live LinkedIn — see the "Lessons from live testing" section below.
 
 LLM support is Bedrock-only by explicit decision (no Anthropic-direct/OpenAI/
 Groq/Gemini/Ollama) — `core/llm.py` and `requirements.txt` were trimmed
 accordingly.
+
+**What Phase 3 validated:**
+- 31 tests pass (repository, scraper framework, `analyze_batch` with a mocked
+  LLM, and `scrape_service` integration tests against real Postgres with a
+  fake scraper) — covering: a full run producing scored `Job` rows in one
+  pass; a deliberately-broken batch not aborting the run; an adapter-level
+  failure (can't reach the site) correctly marking the whole run failed,
+  distinct from a batch-level LLM failure; two pipelines with different
+  resumes not bleeding into each other; extract-only mode (no resume bound)
+  saving everything unscored.
+- **Verified against real Bedrock** (not mocked) with synthetic job data: the
+  structured-output call works end to end, and extraction/match quality is
+  genuinely good — a senior backend role with no AI/ML relevance was
+  correctly scored 0.2 with an accurate rationale, while a well-matched AI
+  Engineer role scored 0.95.
+- **A real finding from that real Bedrock call**: Mistral Large occasionally
+  returns more results than jobs in the batch (a malformed duplicate
+  `job_index=0` followed by the correct one) — `scrape_service.py`'s
+  reassembly already handles this correctly by construction (it's a dict
+  keyed by `job_index`, so the later, correct entry wins), now locked in with
+  an explicit test rather than left as an accidental side effect.
+- A live end-to-end run (real LinkedIn + real Bedrock) was attempted but hit
+  LinkedIn returning zero results for a query/location that worked minutes
+  earlier — consistent with the rate-limiting noted below, not a code bug:
+  the run correctly completed with 0/0/0 rather than crashing or hanging.
+
+**Prompt-quality pass** (in response to real usage concerns — resume-aware
+matching, experience-format consistency), also verified against real
+Bedrock:
+- `experience_years_min` is now explicitly normalized regardless of how a
+  posting phrases it ("1+ years", "0-2 years", "minimum 2 yrs", "entry
+  level" all map to a plain integer) — needed for reliable filtering/sorting
+  later, not just display. Verified live: "3-5 years" → `3`.
+- The prompt now explicitly asks for recruiter-style reasoning about
+  transferable/equivalent skills (resume says "TensorFlow", posting asks for
+  "deep learning frameworks" → counts as a match), not literal string
+  matching against the resume. Verified live.
+- **A real bug this surfaced**: making the prompt richer pushed Mistral Large
+  into occasionally generating runaway `skills_required` lists (280+ items,
+  once degenerating into an unrelated thesaurus of adjectives) — a prose
+  "keep it concise" instruction wasn't enough, and raising the token budget
+  made it *worse* (more room for the runaway to run). Fixed at the schema
+  level instead: `max_length=8` on every skill-list field (surfaced to the
+  model as `maxItems` in its structured-output schema, a much stronger
+  signal than prose) plus a defensive Pydantic validator that truncates
+  regardless of what the model does — "the LLM scores, the system decides,"
+  extended to "the LLM proposes skills, the system caps them." Verified live
+  and locked in with 2 new unit tests.
+
+**Resume-parsing (avoiding resending the full resume every batch call)**:
+raised by a real efficiency question — LLM APIs are stateless per call, so
+the resume must be in every batch's request regardless, but resending the
+*full raw text* every time was avoidable. Added `resume_parser.py`: the LLM
+distills a resume into a compact `ResumeProfile` (title, years, skills,
+summary) **once**, cached in `Resume.parsed_profile`, then every batch call
+for every pipeline bound to that resume reuses the cached profile instead of
+the raw text. `scrape_service.py` resolves it once per run and treats a
+parse failure as a run-level failure (same tier as an adapter failure), not
+a silent fallback to unfiltered mode. Locked in with `test_resume_profile_is_parsed_once_and_cached`
+(runs the same pipeline twice, confirms `parse_resume` is only invoked once).
+
+- **A second real schema bug, found testing with the user's actual two
+  resumes** (same person, one branded "Data Engineer," one "AI/ML Engineer,"
+  both sharing an official "Software Development Engineer" title in their
+  work history): asking the model to prefer the resume's self-branded title
+  over the generic internal one caused it to dump the entire resume into the
+  `current_title` field as a hedging run-on sentence, leaving every other
+  field empty — twice, across two different prompt rewordings. The fix,
+  again, was schema-level rather than more prose: moved every instruction
+  into each field's own `Field(description=...)` (part of the actual tool
+  definition, not just surrounding context) and reordered fields so the
+  naturally verbose ones (`summary`, `skills`) come before the short
+  categorical ones (`current_title`, `total_experience_years`), leaving
+  nowhere earlier in the schema for overflow to spill into. Verified live
+  against both real resumes: DE resume → `current_title: "Data Engineer"`,
+  ML resume → `current_title: "AI/ML Engineer"`, both correctly overriding
+  the shared "SDE" work-history title, both with accurate 1.5-year
+  experience and well-curated skill lists.
 
 **Lessons from live testing** (things a fixture can't catch, since they
 involve LinkedIn's real async client-side rendering):
@@ -108,8 +187,8 @@ installed (it's a ~300MB+ dependency only the `worker` image needs —
 requirements-worker.txt / Dockerfile.worker). So:
 
 ```bash
-# Repository + framework tests (fast, no Playwright needed):
-docker compose run --rm --no-deps api pytest tests/test_repository.py tests/test_scraper_framework.py -v
+# Repository + framework + LLM/scrape-service tests (fast, no Playwright needed):
+docker compose run --rm --no-deps api pytest tests/ --ignore=tests/test_linkedin_adapter.py -v
 
 # LinkedIn adapter tests (fixture-based, needs Playwright+Chromium):
 docker compose run --rm --no-deps worker pytest tests/test_linkedin_adapter.py -v
@@ -119,28 +198,41 @@ imports the real LinkedIn adapter to prove cross-adapter registration — it
 `pytest.importorskip`s Playwright, so it skips (not fails) under `api` and
 only actually runs under `worker`.
 
-## Testing the LinkedIn adapter against real LinkedIn (Phase 2)
+## Testing the real pipeline end to end (Phase 3)
 
-Everything except live-site interaction is verified by the fixture-based
-tests above. To actually pull real jobs, set `LI_AT_COOKIE` in `.env`
-(LinkedIn → DevTools → Application → Cookies → `li_at`), rebuild the worker
-if you just added it (`docker compose build worker && docker compose up -d`),
+Everything except live-site interaction is verified by the tests above
+(including a real, unmocked Bedrock call — see "What Phase 3 validated").
+To run the actual scrape -> extract+match -> filter -> save pipeline against
+real LinkedIn, set `LI_AT_COOKIE` in `.env` (LinkedIn → DevTools →
+Application → Cookies → `li_at`) and make sure your Bedrock credentials are
+set, rebuild if you just changed `.env`
+(`docker compose build worker && docker compose up -d --force-recreate`),
 then:
 
 ```bash
-# 1. Create a pipeline (Phase 7 will replace this with a real POST /pipelines):
-curl -X POST "http://localhost:8000/debug/quick-pipeline?name=Test&query=AI+Engineer&locations=Bangalore,+India"
+# 1. Create a resume (Phase 7 will replace this with real PDF upload):
+curl -X POST http://localhost:8000/debug/quick-resume \
+  -H "Content-Type: application/json" \
+  -d '{"name": "My Resume", "raw_text": "..."}'
+# -> {"resume_id": "...", ...}
+
+# 2. Create a pipeline bound to that resume (Phase 7 replaces with real POST /pipelines).
+#    `locations` is semicolon-separated (a single "City, Country" value already
+#    has a comma in it — see the Phase 2 lesson above):
+curl -X POST "http://localhost:8000/debug/quick-pipeline?name=Test&query=AI+Engineer&locations=Bangalore,+India&resume_id=<id from step 1>"
 # -> {"pipeline_id": "...", ...}
 
-# 2. Trigger a scrape (runs in the worker container, hits real LinkedIn):
-curl -X POST "http://localhost:8000/debug/scrape-preview?pipeline_id=<id from step 1>"
+# 3. Trigger a real run. `limit` keeps it small for manual testing — go easy
+#    on LinkedIn's rate limits (see the lesson above):
+curl -X POST "http://localhost:8000/debug/scrape?pipeline_id=<id from step 2>&limit=5"
 
-# 3. Check what landed in Postgres — should show batches of 5 with
-#    date_posted populated (the exact field that was silently empty for
-#    every job in v1):
-curl "http://localhost:8000/debug/scrape-preview-log?pipeline_id=<id from step 1>"
+# 4. Inspect what happened:
+curl "http://localhost:8000/debug/scrape-runs?pipeline_id=<id from step 2>"   # status + counters
+curl "http://localhost:8000/debug/jobs?pipeline_id=<id from step 2>"          # saved, scored jobs
+curl "http://localhost:8000/debug/rejected-jobs?pipeline_id=<id from step 2>" # filtered-out jobs + why
 ```
-`docker compose logs worker` shows progress per batch. Without a cookie set,
-step 2 fails fast and cleanly with `LI_AT_COOKIE is not set` — verified
-during Phase 2 development — rather than hanging or failing obscurely deep
-inside a Playwright call.
+
+`docker compose logs worker` shows progress. Omit `resume_id` in step 2 to
+test FR-2.6's extract-only mode (every job saved, none filtered, all
+unscored). Without `LI_AT_COOKIE` set, step 3 fails fast and cleanly with
+`LI_AT_COOKIE is not set` rather than hanging.

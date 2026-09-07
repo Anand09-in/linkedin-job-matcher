@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -35,6 +36,21 @@ class Settings(BaseSettings):
     llm_temperature: float = Field(0.1)
     llm_max_tokens: int = Field(2000)
 
+    # Batch extraction (analyze_batch) returns up to 5 full structured
+    # results in one response — the default llm_max_tokens (sized for a
+    # single-feature call) isn't enough headroom. Confirmed live: a 2-job
+    # batch under the default budget hit the token ceiling mid-response and
+    # degenerated into a runaway, incomplete result. Kept as its own setting
+    # rather than just raising llm_max_tokens globally, since single-feature
+    # calls (cover letter, etc.) don't need this much room.
+    llm_batch_extract_max_tokens: int = Field(4000)
+
+    # Cap on concurrent in-flight Bedrock calls across ALL pipelines in this
+    # worker process (system-design.md §2.3) — sized conservatively since the
+    # "safe" number is account-tier-specific; v1 had to serialize Bedrock
+    # calls entirely (max_workers=1) after hitting ThrottlingException.
+    llm_max_concurrent_calls: int = Field(2)
+
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""
     aws_region: str = Field("us-east-1")
@@ -42,6 +58,12 @@ class Settings(BaseSettings):
 
     # ── LinkedIn (needed once scrapers/linkedin lands in Phase 2) ───────────────
     li_at_cookie: str = Field("", description="LinkedIn li_at session cookie")
+
+    # ── Matching defaults (FR-1A.4) — a Pipeline may override either; these
+    #    are the system-wide fallback when it doesn't, not hardcoded in the
+    #    filter logic itself. ─────────────────────────────────────────────────
+    default_min_match_score: float = Field(0.40)
+    default_max_experience_years: Optional[int] = Field(None)
 
 
 @lru_cache
