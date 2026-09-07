@@ -41,10 +41,10 @@ v1 scrapes first, stores raw jobs, then runs a separate LangGraph pipeline (JD p
 - FR-2.6: A pipeline MAY be configured with no resume bound, running in "extract only, no filter" mode (config toggle), persisting jobs unscored — useful for a general market-scan pipeline that isn't tied to any one resume.
 - FR-2.7: Re-scoring a job against a different resume after the fact is out of scope for v2.1 (documented as a known limitation — see system-design.md §Trade-offs). Re-running the same job posting through a *different pipeline* (different resume) is not the same thing and is fully supported — see FR-1A.5.
 
-### FR-3 — Single unified LLM, selectable from the UI
-- FR-3.1: There MUST be exactly one active LLM configuration (provider + model + temperature + max_tokens) used for extraction+filtering, and for every on-demand feature. No separate embedding model, no per-feature model override.
+### FR-3 — Single unified LLM (Bedrock only), selectable from the UI
+- FR-3.1: There MUST be exactly one active LLM configuration (model + temperature + max_tokens — provider is fixed to Bedrock, not user-selectable, per FR-3.3) used for extraction+filtering, and for every on-demand feature. No separate embedding model, no per-feature model override.
 - FR-3.2: The active LLM MUST be changeable from the UI (Settings page) without editing `.env` or restarting containers, and MUST persist across restarts (stored in DB, not just env).
-- FR-3.3: The UI MUST list the supported providers (Bedrock, Anthropic, OpenAI, Groq, Gemini, Ollama — carried over from v1's `llm_factory.py`) and, where feasible, fetch/display available models per provider.
+- FR-3.3: Amazon Bedrock is the ONLY supported provider (narrowed from v1's six-provider `llm_factory.py` by explicit decision — no Anthropic-direct, OpenAI, Groq, Gemini, or Ollama in v2). The UI lets the user pick a Bedrock *model* (e.g. Claude Haiku vs. Mistral Large), not a provider.
 - FR-3.4: Changing the active LLM MUST NOT require re-running past scrapes; it only affects future extraction/matching/feature calls.
 
 ### FR-4 — Persistence

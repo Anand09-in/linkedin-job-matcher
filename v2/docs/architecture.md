@@ -37,7 +37,7 @@ flowchart TB
     end
 
     subgraph External
-        LLM["LLM provider<br/>(Bedrock / Anthropic / OpenAI / Groq / Gemini / Ollama)"]
+        LLM["Amazon Bedrock<br/>(only supported provider — FR-3.3)"]
         WEB["Web search<br/>(ddgs) for salary enrichment"]
         SITES["Job sites<br/>(LinkedIn today, more via adapters)"]
     end
@@ -219,7 +219,7 @@ Notes:
 - `PIPELINE` replaces v1's single global `config.yaml` `queries:` section (and this doc's earlier draft `SCRAPER_CONFIG`) with one or more independently runnable, resume-bound rows — this is what makes "an AI Engineer pipeline and a Data Engineer pipeline, each with their own resume, running independently" (FR-1A) a first-class concept instead of a single global setting.
 - `RESUME` drops v1's `is_active` boolean entirely — there is no single active resume in v2; a resume is simply "in the library," and whichever pipeline(s) reference it via `PIPELINE.resume_id` use it. `RESUME.name` is new (a short user-given label like "AI Engineer" or "Data Engineer") since multiple resumes now need to be distinguishable in the UI.
 - `JOB.pipeline_id` (denormalized alongside `scrape_run_id`, which already implies a pipeline via `SCRAPE_RUN.pipeline_id`) exists specifically so the UI can filter "jobs from the Data Engineer pipeline" with a simple indexed column instead of a join (FR-1A.6).
-- `LLM_SETTING` (single active row) moves v1's `.env`-only LLM config into the database so the UI can change it at runtime (FR-3.2) — this one stays global/singular by design (one LLM for everything, per FR-3.1), unlike resumes/pipelines which are explicitly multi.
+- `LLM_SETTING` (single active row) moves v1's `.env`-only LLM config into the database so the UI can change it at runtime (FR-3.2) — this one stays global/singular by design (one LLM for everything, per FR-3.1), unlike resumes/pipelines which are explicitly multi. `provider` is always `"bedrock"` (FR-3.3) — kept as a column rather than dropped so the shape doesn't need to change if that decision is ever revisited, but nothing in v2 reads it as a variable today.
 
 ### 3.3 Core interfaces (illustrative signatures)
 

@@ -1,0 +1,6 @@
+# Worker-only additions on top of requirements.txt. Split out so the api/
+# migrate images (which never scrape) don't pay for a ~300MB Chromium
+# download and its OS-level dependencies on every rebuild.
+-r requirements.txt
+
+playwright==1.49.0

@@ -14,13 +14,15 @@ from loguru import logger
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging
-from app.workers.tasks import ping_task
+from app.scrapers.bootstrap import bootstrap as bootstrap_scrapers
+from app.workers.tasks import ping_task, run_scrape_preview_task
 
 settings = get_settings()
 
 
 async def on_startup(ctx):
     configure_logging()
+    bootstrap_scrapers()
     logger.info("[worker] started")
 
 
@@ -29,7 +31,7 @@ async def on_shutdown(ctx):
 
 
 class WorkerSettings:
-    functions = [ping_task]
+    functions = [ping_task, run_scrape_preview_task]
     on_startup = on_startup
     on_shutdown = on_shutdown
     redis_settings = RedisSettings.from_dsn(settings.redis_url)

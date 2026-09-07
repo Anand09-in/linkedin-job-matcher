@@ -30,18 +30,10 @@ class Settings(BaseSettings):
     # ── Task queue / cache (Redis — architecture.md §1) ─────────────────────────
     redis_url: str = Field("redis://redis:6379/0")
 
-    # ── LLM provider (single factory — FR-3, carried over var names from v1) ───
-    llm_provider: str = Field("groq", description="anthropic|openai|groq|ollama|gemini|bedrock")
-    llm_model: str = Field("llama-3.3-70b-versatile")
+    # ── LLM — Bedrock only (FR-3, narrowed by explicit user decision: no
+    #    Anthropic-direct/OpenAI/Groq/Gemini/Ollama support in v2 at all) ───────
     llm_temperature: float = Field(0.1)
     llm_max_tokens: int = Field(2000)
-
-    anthropic_api_key: str = ""
-    openai_api_key: str = ""
-    groq_api_key: str = ""
-    google_api_key: str = ""
-
-    ollama_base_url: str = "http://localhost:11434"
 
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""

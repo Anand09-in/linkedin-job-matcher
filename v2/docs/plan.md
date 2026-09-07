@@ -64,13 +64,13 @@ Each phase has a goal, deliverables, and exit criteria — a phase isn't "done" 
 **Exit criteria:** timing evidence (logs/timestamps) that job save and salary enrichment complete independently — a batch's next iteration is not observed waiting on a prior batch's salary tasks.
 
 ## Phase 5 — Single LLM selection, UI-driven
-**Goal:** FR-3 in full — one model config, changeable at runtime, used everywhere.
+**Goal:** FR-3 in full — one Bedrock model config, changeable at runtime, used everywhere.
 
 - `LLMSetting` CRUD (`GET/PUT /settings/llm`), read by `core/llm.py` on every call site (extraction, salary synthesis, every feature) instead of env-only config.
 - Remove the v1-style per-call `model`/`provider` override surface from feature endpoints (FR-3.1) — one active setting, no exceptions.
-- Provider list carried over from v1's `llm_factory.py` (Bedrock, Anthropic, OpenAI, Groq, Gemini, Ollama), each still going through the corresponding LangChain chat class (including the `ChatBedrockConverse` fix from Phase 0).
+- Bedrock is the only provider (FR-3.3, decided during Phase 2) — `core/llm.py` has no other provider branches to carry over. What's selectable is the Bedrock *model id* (e.g. Claude Haiku vs. Mistral Large), via `ChatBedrockConverse` (the fix already carried over since Phase 0).
 
-**Exit criteria:** switching the active LLM via API (ahead of a real Settings UI existing) changes which provider both a new scrape run's extraction and an on-demand feature call use, with no container restart.
+**Exit criteria:** switching the active Bedrock model via API (ahead of a real Settings UI existing) changes which model both a new scrape run's extraction and an on-demand feature call use, with no container restart.
 
 ## Phase 6 — On-demand features
 **Goal:** port v1's `features/` modules to the single-LLM model and per-job/per-click UX (FR-6).

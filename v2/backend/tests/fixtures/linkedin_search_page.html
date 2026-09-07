@@ -1,0 +1,82 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>fixture</title></head>
+<body>
+  <div class="scaffold-layout__list">
+    <div class="job-card-container">
+      <a class="job-card-container__link" href="/jobs/view/1111"
+         data-description="Build and ship ML models at scale.">
+        <div class="artdeco-entity-lockup__title">Machine Learning Engineer</div>
+      </a>
+      <div class="artdeco-entity-lockup__subtitle">Acme Corp</div>
+      <div class="artdeco-entity-lockup__caption">Bangalore, India</div>
+      <time datetime="2026-08-20T00:00:00.000Z"></time>
+    </div>
+
+    <div class="job-card-container">
+      <a class="job-card-container__link" href="/jobs/view/2222"
+         data-description="Own our data pipelines end to end.">
+        <div class="artdeco-entity-lockup__title">Data Engineer</div>
+      </a>
+      <div class="artdeco-entity-lockup__subtitle">Beta Inc</div>
+      <div class="artdeco-entity-lockup__caption">Remote</div>
+      <time datetime="2026-08-15T00:00:00.000Z"></time>
+    </div>
+
+    <!-- Third card deliberately has no <time> element, to exercise the
+         "date_posted missing" path the adapter must handle gracefully. -->
+    <div class="job-card-container">
+      <a class="job-card-container__link" href="/jobs/view/3333"
+         data-description="No posted date available for this one.">
+        <div class="artdeco-entity-lockup__title">Backend Engineer</div>
+      </a>
+      <div class="artdeco-entity-lockup__subtitle">Gamma LLC</div>
+      <div class="artdeco-entity-lockup__caption">Mumbai, India</div>
+    </div>
+
+    <!-- Fourth card has a <time> element with NO datetime attribute, only
+         visible relative text — confirmed live during Phase 2 testing that
+         real LinkedIn does exactly this for some listings. -->
+    <div class="job-card-container">
+      <a class="job-card-container__link" href="/jobs/view/4444"
+         data-description="Relative-time-only posting.">
+        <div class="artdeco-entity-lockup__title">Platform Engineer</div>
+      </a>
+      <div class="artdeco-entity-lockup__subtitle">Delta Co</div>
+      <div class="artdeco-entity-lockup__caption">Hyderabad, India</div>
+      <time>1 week ago</time>
+    </div>
+
+    <!-- Fifth card is a promoted/sponsored listing — no date at all, plus a
+         "Promoted" badge as one of its <li> items, exactly matching what a
+         real live scrape showed during Phase 2 testing (a batch of 5 jobs
+         all had date_posted=None, and this was the reason: they were all
+         promoted listings, not an extraction failure). -->
+    <div class="job-card-container">
+      <a class="job-card-container__link" href="/jobs/view/5555"
+         data-description="Sponsored posting with no date badge.">
+        <div class="artdeco-entity-lockup__title">Cloud Engineer</div>
+      </a>
+      <div class="artdeco-entity-lockup__subtitle">Epsilon Ltd</div>
+      <div class="artdeco-entity-lockup__caption">Pune, India</div>
+      <ul>
+        <li>Full-time</li>
+        <li>Promoted</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Simulates LinkedIn's real single-page detail panel: clicking a job
+       card swaps this element's content rather than navigating away. -->
+  <div class="jobs-description">Select a job to see its description.</div>
+
+  <script>
+    document.querySelectorAll('.job-card-container__link').forEach(function (link) {
+      link.addEventListener('click', function (event) {
+        event.preventDefault();
+        document.querySelector('.jobs-description').innerText = link.getAttribute('data-description');
+      });
+    });
+  </script>
+</body>
+</html>
