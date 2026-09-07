@@ -5,8 +5,12 @@ plan, and the other docs it links to ([functional-requirements.md](docs/function
 [architecture.md](docs/architecture.md), [system-design.md](docs/system-design.md),
 [flow-diagrams.md](docs/flow-diagrams.md)) for the full design.
 
-**Status:** Phase 0 (Foundations) — container topology only, no real domain
-logic yet. Job scraping/matching still lives in the v1 code at the repo root.
+**Status:** Phase 1 (Domain model & persistence) complete. Real schema —
+`Resume`, `Pipeline`, `ScrapeRun`, `Job`, `RejectedJob`, `LLMSetting` — plus an
+async repository with full CRUD, filtering/pagination/sort, bulk-delete-by-date,
+and multi-resume/multi-pipeline isolation, all covered by a Postgres-backed
+integration test suite. No scraping or LLM calls yet — that's Phase 2/3. Job
+scraping/matching still lives in the v1 code at the repo root until cutover.
 
 ## Quickstart (Phase 0)
 
@@ -43,3 +47,25 @@ port 8000), change `API_PORT`/`FRONTEND_PORT` in `.env` (FR-9.3).
 
 `/debug/ping` and `/debug/ping-log` are Phase 0 scaffolding only — they get
 removed once Phase 3 has a real scrape trigger to exercise the same wiring.
+
+## Running the backend test suite (Phase 1+)
+
+Postgres has no host-published port by design (see docker-compose.yml), so
+tests run inside a container on the Compose network rather than from the host:
+
+```bash
+docker compose run --rm --no-deps api pytest -v
+```
+
+This spins up a dedicated `job_matcher_test` database (dropped/recreated fresh
+each run), applies all Alembic migrations to it, and tears it down afterward —
+your dev database (`job_matcher`) is never touched by tests.
+
+**Gotcha to know about:** `migrate` and `api` share one Dockerfile and are
+pinned to the same `image: v2_backend:local` tag in docker-compose.yml
+specifically so they can't drift apart. If you ever add a service that copies
+that Dockerfile instead of reusing the tag, `docker compose build api` alone
+will silently leave it stale — this bit Phase 1 development directly (a
+rebuilt `api` image left `migrate` running old code, so `alembic upgrade head`
+"succeeded" against a schema one migration behind). Prefer a bare
+`docker compose build` (no service filter) when in doubt.

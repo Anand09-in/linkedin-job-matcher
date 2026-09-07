@@ -37,8 +37,18 @@ services:
 
   # ── One-off migration runner — api/worker wait for this to finish (not just
   #    for postgres to accept connections) before starting, so neither ever
-  #    reads/writes against a schema that isn't there yet. ───────────────────────
+  #    reads/writes against a schema that isn't there yet.
+  #
+  #    `image:` is pinned to the SAME tag as `api` below (both build from the
+  #    same Dockerfile) so there is only ever one image for the two of them —
+  #    `docker compose build api` (or `build migrate`) rebuilds both. Without
+  #    this, migrate and api silently drift into two separate images that
+  #    happen to share a Dockerfile, which is exactly the bug that bit this
+  #    project during Phase 1 development: rebuilding `api` alone left
+  #    `migrate` running a stale image that didn't have the latest migration,
+  #    and `alembic upgrade head` "succeeded" against the wrong target. ───────
   migrate:
+    image: v2_backend:local
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -53,6 +63,7 @@ services:
 
   # ── FastAPI backend ──────────────────────────────────────────────────────────
   api:
+    image: v2_backend:local
     build:
       context: ./backend
       dockerfile: Dockerfile
