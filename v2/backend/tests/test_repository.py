@@ -359,25 +359,12 @@ async def test_llm_setting_single_active_row(repo):
 # ── ScraperCredential (Phase 8 — UI-editable, e.g. LinkedIn's li_at cookie) ──
 
 
-async def test_scraper_credential_upsert_and_check_result(repo):
+async def test_scraper_credential_upsert(repo):
     assert await repo.get_scraper_credential("linkedin") is None
 
     first = await repo.set_scraper_credential("linkedin", "cookie-v1")
     assert first.value == "cookie-v1"
-    assert first.last_check_status is None
 
-    checked = await repo.record_scraper_credential_check("linkedin", "valid")
-    assert checked.last_check_status == "valid"
-    assert checked.last_checked_at is not None
-
-    # Replacing the value resets any prior check result — a freshly-pasted
-    # cookie hasn't been tested yet, so the old "valid" must not linger.
     updated = await repo.set_scraper_credential("linkedin", "cookie-v2")
     assert updated.id == first.id  # same row, upserted in place
     assert updated.value == "cookie-v2"
-    assert updated.last_check_status is None
-    assert updated.last_checked_at is None
-
-
-async def test_record_check_result_for_missing_credential_is_a_noop(repo):
-    assert await repo.record_scraper_credential_check("linkedin", "valid") is None

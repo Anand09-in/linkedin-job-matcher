@@ -300,14 +300,23 @@ class CoverLetterResult(BaseModel):
     cover_letter: str = Field(
         ...,
         description=(
-            "REQUIRED. The complete cover letter body text, ready to paste as-is — body only, no "
-            "address, date, subject line, greeting placeholder, or sign-off. Exactly 3 paragraphs: "
-            "(1) a hook referencing something concrete and specific about this exact role/company from "
-            "the job description, (2) one specific, real achievement from the candidate's work history "
-            "tied to a stated requirement, (3) a one-sentence close on why this role is the logical next "
-            "step plus a one-sentence call to action. Never use cliché phrases like 'excited to apply', "
-            "'passionate about', 'team player', 'results-driven', 'hard worker', 'think outside the box', "
-            "or open with the word 'I'."
+            "REQUIRED. A complete cover letter in real letter format, ready to paste as-is, with THREE "
+            "required structural pieces in this exact order and never omitted: (1) the line 'Dear "
+            "Hiring Manager,' (or a named contact if one is given) as its own opening line, (2) exactly "
+            "3 body paragraphs, (3) the word 'Sincerely,' alone on its own final line — this closing "
+            "line is REQUIRED, never leave the letter without it. No address block, date, or subject "
+            "line, and no name after 'Sincerely,' (the candidate's name isn't given to you, so never "
+            "invent a placeholder like '[Your Name]'). The 3 body paragraphs: (1) a hook "
+            "referencing something concrete and specific about this exact role/company from the job "
+            "description, (2) how the candidate's ACTUAL background (from the resume material given) "
+            "connects to a stated requirement — use a specific, real achievement ONLY if the raw resume "
+            "excerpt actually contains one with real detail; otherwise speak honestly and specifically "
+            "about their real skills/experience without inventing a metric or story that isn't in the "
+            "resume text, (3) a one-sentence close on why this role is the logical next step plus a "
+            "one-sentence call to action. Target length is given in the prompt — treat it as the target "
+            "for the 3 body paragraphs combined. Never use cliché phrases like 'excited to apply', "
+            "'passionate about', 'team player', 'results-driven', 'hard worker', 'think outside the "
+            "box', or open the first body paragraph with the word 'I'."
         ),
     )
 
@@ -490,6 +499,28 @@ class ResumeImprovementResult(BaseModel):
         return value
 
 
+class AllFeaturesResult(BaseModel):
+    """One combined structured-output call replacing four separate ones —
+    added per explicit user request: opening a job's on-demand features
+    should cost one LLM call for cover_letter/interview_prep/
+    company_research/resume_improvement, not four independent round trips.
+    referral_message (needs contact-info params the user hasn't supplied
+    yet at that point) and referral_search (needs a live web search's
+    results fed in first, not just job/resume context) stay separate,
+    on-demand-only calls — bundling those wouldn't make sense the way
+    these four "generate straight from job+resume" tasks do.
+
+    Nesting doesn't lose each field's own instructions: the full nested
+    JSON schema (every description= on every class above) still reaches
+    the model as part of the structured-output tool definition, exactly as
+    if each were requested standalone."""
+
+    cover_letter: CoverLetterResult
+    interview_prep: InterviewPrepResult
+    company_research: CompanyResearchResult
+    resume_improvement: ResumeImprovementResult
+
+
 class ReferralMessageResult(BaseModel):
     """A single field on purpose: channel/contact name/tone are caller-
     supplied context baked into the prompt (referral_message.py), not
@@ -502,51 +533,12 @@ class ReferralMessageResult(BaseModel):
             "REQUIRED. The complete outreach message text, ready to send as-is — personalized using "
             "the specific contact name/title and job/company context given in the prompt, concise, no "
             "generic filler, no unfilled placeholders like '[Name]', and respecting whatever "
-            "length/tone constraint the prompt specifies for the target channel."
+            "length/tone constraint the prompt specifies for the target channel. The sender's own name "
+            "is NOT given to you, so if the message closes with a sign-off (a DM/InMail can; a "
+            "connection request should not, it has no room), end it with just 'Best,' or 'Thanks,' and "
+            "STOP THERE — never invent or leave a placeholder like '[Your Name]' after it; LinkedIn "
+            "already shows the sender's real name/photo next to the message, so no signature is needed."
         ),
     )
 
 
-class NegotiationPrepResult(BaseModel):
-    assessment: str = Field(
-        ...,
-        description=(
-            "REQUIRED: 2-3 honest sentences on where the candidate's target likely sits relative to "
-            "the job's estimated salary range given their experience level — say plainly if the "
-            "available salary data is too thin/low-confidence to anchor a number on, rather than "
-            "papering over it."
-        ),
-    )
-    target_ask: Optional[str] = Field(
-        None,
-        description=(
-            "A concrete opening figure or range to ask for, in the salary benchmark's own currency/"
-            "period — or null if the benchmark is missing/low-confidence and there's no honest basis "
-            "for a number (explain that in assessment instead of guessing one)."
-        ),
-    )
-    talking_points: list[str] = Field(
-        default_factory=list, max_length=6,
-        description="3-6 SPECIFIC leverage points using the candidate's actual background/skills and the salary data given — not generic negotiation advice.",
-    )
-    scripts: list[str] = Field(
-        default_factory=list, max_length=4, description="2-4 short, ready-to-say phrases for the actual negotiation conversation.",
-    )
-    risks_to_avoid: list[str] = Field(
-        default_factory=list, max_length=4,
-        description="Specific mistakes to avoid in THIS negotiation given the role's seniority/context — not generic tips like 'be confident'.",
-    )
-
-    @field_validator("talking_points", mode="before")
-    @classmethod
-    def _cap_talking_points(cls, value):
-        if isinstance(value, list) and len(value) > 6:
-            return value[:6]
-        return value
-
-    @field_validator("scripts", "risks_to_avoid", mode="before")
-    @classmethod
-    def _cap_lists(cls, value):
-        if isinstance(value, list) and len(value) > 4:
-            return value[:4]
-        return value

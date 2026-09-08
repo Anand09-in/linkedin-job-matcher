@@ -1,38 +1,106 @@
 """
-LinkedIn scraper adapter — Playwright-based, owns its DOM selectors directly
-instead of depending on the third-party `linkedin-jobs-scraper` library v1
-used (system-design.md decision log #3): that library's selector bugs — most
-concretely, date_posted coming back empty for every one of the 324 jobs in
-v1's database — were unfixable from our side except by forking it.
+LinkedIn scraper adapter — wraps v1's proven `linkedin-jobs-scraper` library
+(Selenium + real Chrome) instead of driving Playwright directly.
 
-Session handling: reuses the li_at cookie (same approach v1 took) to hit the
-authenticated jobs-search UI, which exposes a `<time datetime="...">` element
-this adapter reads directly — fixing the v1 bug at the source rather than
-working around it downstream.
+Real, live incident this rewrite responds to (2026-09-08): a hand-rolled
+Playwright adapter — even after adding navigator.webdriver spoofing
+(browser.py, now removed) and human-like delays between clicks — got a real
+LinkedIn account restricted (LinkedIn's own "unauthorized access or other
+activity that doesn't comply with our policies" lockout, requiring ID
+verification to recover) within minutes of a 5-job test run. Side-by-side on
+a second account: v1's `linkedin-jobs-scraper` scraped 200+ jobs in one run
+with zero issues, using the exact config in this repo's root `config.yaml`
+(slow_mo=1.5, max_workers=1, page_load_timeout=40, headless=True — real
+Chrome via Selenium, not Playwright's bundled Chromium).
 
-`_extract_job` is factored out from the navigation/pagination loop
-specifically so it can be exercised directly against a fixture-loaded page in
-tests (system-design.md §6: "tested against recorded HTML fixtures, not live
-LinkedIn") without mocking Playwright's navigation machinery.
+This adapter reuses that exact config rather than re-guessing new
+anti-detection knobs on top of a custom scraper — the whole point is to stop
+being the thing that's different from what's already proven safe. The
+library owns DOM selectors, pagination, and card-click pacing internally;
+this file's job is just bridging its synchronous, callback-driven API
+(`scraper.run()` blocks and fires `Events.DATA` per job) into v2's
+`AsyncIterator[list[RawJob]]` contract, and mapping its `EventData` fields
+onto `RawJob`.
+
+Trade-off accepted, not silently absorbed: this reintroduces v1's own
+`date_posted` unreliability (system-design.md decision log #3's whole reason
+for writing a from-scratch Playwright adapter in the first place). Account
+safety wins that trade — a wrong/missing posted-date is a data-quality
+annoyance; an account lockout is not. `_parse_date`/`_parse_relative_time`
+below still run on whatever the library DOES give back, so this only
+regresses to "as good as v1", not worse.
+
+Real, live gap found after this rewrite shipped: the Pipelines page "Stop"
+action set ScrapeRun.cancel_requested, but the run kept scraping regardless
+— clicking Stop had visibly zero effect, still hitting LinkedIn minutes
+later. Root cause: `linkedin_jobs_scraper.LinkedinScraper` exposes no
+stop()/cancel() API at all (checked its source directly — `run()` just
+blocks a ThreadPoolExecutor future with no interrupt hook), and the
+webdriver instance it creates per-location is a local variable buried
+inside a private method, never exposed to callers. There is no clean,
+library-level way to interrupt it. `_iter_jobs` below now runs a watcher
+task alongside the scrape that polls ScrapeRun.cancel_requested directly
+and, on seeing it, kills the chromedriver/chrome OS processes THIS worker
+process spawned (`_kill_browser_descendants`) — blunt, but it is the only
+lever that actually exists, and it makes the next Selenium command raise,
+which aborts the library's run() promptly instead of letting it finish on
+its own.
 """
 from __future__ import annotations
 
+import asyncio
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 from loguru import logger
-from playwright.async_api import Locator, Page, async_playwright
 
-from app.core.config import get_settings
+from linkedin_jobs_scraper import LinkedinScraper
+from linkedin_jobs_scraper.config import Config as LJSConfig
+from linkedin_jobs_scraper.events import Events, EventData
+from linkedin_jobs_scraper.filters import (
+    ExperienceLevelFilters,
+    OnSiteOrRemoteFilters,
+    RelevanceFilters,
+    TimeFilters,
+    TypeFilters,
+)
+from linkedin_jobs_scraper.query import Query, QueryFilters, QueryOptions
+from webdriver_manager.chrome import ChromeDriverManager
+
 from app.scrapers.base import RawJob, ScrapeConfig, batched
-from app.scrapers.linkedin import selectors
-from app.scrapers.linkedin.url_builder import build_search_url
 from app.scrapers.registry import register
 
-_HOME_URL = "https://www.linkedin.com"
-_PAGE_SIZE = 25
+# Proven-safe values from this repo's root config.yaml (v1) — see this
+# module's docstring for why these aren't re-tuned here.
+_SLOW_MO = 1.5
+_MAX_WORKERS = 1
+_PAGE_LOAD_TIMEOUT = 40
+
+_RELEVANCE = {"RECENT": RelevanceFilters.RECENT, "RELEVANT": RelevanceFilters.RELEVANT}
+_TIME = {"DAY": TimeFilters.DAY, "WEEK": TimeFilters.WEEK, "MONTH": TimeFilters.MONTH, "ANY": TimeFilters.ANY}
+_TYPE = {
+    "FULL_TIME": TypeFilters.FULL_TIME,
+    "PART_TIME": TypeFilters.PART_TIME,
+    "CONTRACT": TypeFilters.CONTRACT,
+    "TEMPORARY": TypeFilters.TEMPORARY,
+    "INTERNSHIP": TypeFilters.INTERNSHIP,
+}
+_EXPERIENCE = {
+    "INTERNSHIP": ExperienceLevelFilters.INTERNSHIP,
+    "ENTRY_LEVEL": ExperienceLevelFilters.ENTRY_LEVEL,
+    "ASSOCIATE": ExperienceLevelFilters.ASSOCIATE,
+    "MID_SENIOR": ExperienceLevelFilters.MID_SENIOR,
+    "DIRECTOR": ExperienceLevelFilters.DIRECTOR,
+    "EXECUTIVE": ExperienceLevelFilters.EXECUTIVE,
+}
+_REMOTE = {
+    "ON_SITE": OnSiteOrRemoteFilters.ON_SITE,
+    "REMOTE": OnSiteOrRemoteFilters.REMOTE,
+    "HYBRID": OnSiteOrRemoteFilters.HYBRID,
+}
 
 
 def _parse_date(raw: Optional[str]) -> Optional[datetime]:
@@ -41,7 +109,6 @@ def _parse_date(raw: Optional[str]) -> Optional[datetime]:
     try:
         return datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
-        logger.debug(f"[linkedin] unparseable date_posted raw value: {raw!r}")
         return None
 
 
@@ -57,19 +124,9 @@ _RELATIVE_UNIT_ALIASES: dict[str, str] = {
 
 
 def _parse_relative_time(text: str, now: Optional[datetime] = None) -> Optional[datetime]:
-    """
-    Best-effort parse of LinkedIn's human-readable relative time badge
-    ("1 day ago", "3w", "2 months ago", ...) into an absolute datetime.
-
-    Confirmed live during Phase 2 testing: the <time> element's `datetime`
-    attribute isn't always present — some listings only render this relative
-    text with no machine-readable value at all. This is why RawJob keeps
-    BOTH date_posted_raw (always set when the site gives us anything) and
-    date_posted (only set when we could confidently turn it into a real
-    date) — months/years are approximated (30/365 days), so this is good
-    enough for filtering/sorting, not display-grade precision. Returns None
-    for anything unrecognized rather than guessing.
-    """
+    """Best-effort parse of a human-readable relative time badge ("1 day
+    ago", "3w") into an absolute datetime — see RawJob's docstring for why
+    date_posted_raw is always kept alongside this best-effort parse."""
     if not text:
         return None
     now = now or datetime.now(timezone.utc)
@@ -84,7 +141,7 @@ def _parse_relative_time(text: str, now: Optional[datetime] = None) -> Optional[
     if not match:
         return None
     amount = int(match.group(1))
-    unit_word = match.group(2).rstrip("s")  # "days"/"weeks"/... -> singular
+    unit_word = match.group(2).rstrip("s")
     unit = _RELATIVE_UNIT_ALIASES.get(unit_word)
     if unit is None:
         return None
@@ -96,160 +153,102 @@ def _parse_relative_time(text: str, now: Optional[datetime] = None) -> Optional[
     return now - timedelta(**{unit: amount})
 
 
-async def _text_or_none(locator: Locator) -> Optional[str]:
-    first = locator.first
-    if await first.count() == 0:
-        return None
-    text = (await first.inner_text()).strip()
-    return text or None
-
-
 def _canonicalize_link(url: str) -> str:
-    """
-    Strip query params — LinkedIn appends different tracking tokens (trk=,
-    trackingId=, refId=, eBP=) to the SAME job's link depending on which
-    search result page it appeared on, confirmed against real scraped data
-    during Phase 2 testing (the identical job showed up with different query
-    strings across pages/locations in one run). Deduping on the raw href
-    would silently treat one job as several; /jobs/view/<id>/ — the path —
-    is the actual stable identifier, and canonicalizing it here means every
-    downstream consumer (this adapter's own in-run dedup, and the DB-level
-    unique constraint on Job.link) inherits the fix for free.
-    """
+    """Strip tracking query params (trk=, trackingId=, refId=, eBP=) so the
+    same job seen twice canonicalizes to the same link for dedup — see
+    Job.link's unique constraint."""
     parts = urlsplit(url)
     return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
 
-def _clean_title(raw: str) -> str:
-    """
-    LinkedIn's title element contains two newline-joined lines for the same
-    job (an accessibility/duplicate line, then the real — sometimes more
-    complete, e.g. "...with verification" — title). Confirmed against real
-    scraped data during Phase 2 testing: v1's third-party library already
-    had to work around this the same way (split on '\n', keep index 1).
-    """
-    parts = raw.split("\n")
-    return parts[1].strip() if len(parts) > 1 else parts[0].strip()
+def _build_query(config: ScrapeConfig) -> Query:
+    f = config.filters or {}
+    type_filters = [_TYPE[t] for t in f.get("type", []) if t in _TYPE] or None
+    exp_filters = [_EXPERIENCE[e] for e in f.get("experience", []) if e in _EXPERIENCE] or None
+    remote_filters = [_REMOTE[r] for r in f.get("on_site_or_remote", []) if r in _REMOTE] or None
 
-
-async def _is_promoted(card: Locator) -> bool:
-    """
-    Ported from v1's third-party library, which scanned every <li> in the
-    card for exact text "Promoted" — the same technique, same reason: no
-    dedicated class exists for this badge. Matters here specifically because
-    promoted/sponsored listings carry no posted-date at all, unlike organic
-    ones (confirmed live during Phase 2 testing — a batch of results with
-    date_posted=None for every job turned out to be entirely promoted
-    listings, not an extraction failure).
-    """
-    items = card.locator(selectors.CARD_LIST_ITEMS)
-    count = await items.count()
-    for i in range(count):
-        text = (await items.nth(i).inner_text()).strip()
-        if text == selectors.PROMOTED_LABEL:
-            return True
-    return False
-
-
-async def extract_job(page: Page, card: Locator) -> Optional[RawJob]:
-    """
-    Extract one RawJob from a single job-card Locator already on the page,
-    clicking through to load its description panel.
-
-    Pure w.r.t. navigation — takes an already-loaded Page/Locator, so it's
-    the unit under test in test_linkedin_adapter.py against a saved fixture.
-    """
-    link_el = card.locator(selectors.JOB_LINK).first
-    if await link_el.count() == 0:
-        return None
-    href = await link_el.get_attribute("href")
-    if not href:
-        return None
-    absolute = href if href.startswith("http") else f"https://www.linkedin.com{href}"
-    link = _canonicalize_link(absolute)
-
-    # Scroll the card into view BEFORE reading any of its fields. LinkedIn's
-    # job list lazily hydrates card content (confirmed live during Phase 2
-    # testing: date_posted came back populated for only 1/7 real jobs until
-    # this reorder) — reading fields from an off-screen, not-yet-hydrated
-    # card is exactly how v1's date_posted bug happened, just less visibly
-    # (v1 never scrolled per-card at all, so it failed 100% of the time
-    # instead of intermittently).
-    await link_el.scroll_into_view_if_needed()
-
-    title_raw = await _text_or_none(card.locator(selectors.TITLE)) or ""
-    title = _clean_title(title_raw)
-    company = await _text_or_none(card.locator(selectors.COMPANY)) or ""
-    place = await _text_or_none(card.locator(selectors.PLACE))
-    promoted = await _is_promoted(card)
-
-    date_posted_raw: Optional[str] = None
-    date_posted: Optional[datetime] = None
-    date_el = card.locator(selectors.DATE).first
-    try:
-        # Not "the element exists" (it may already be attached but still
-        # hydrating) — genuinely absent on some listings, so a short timeout
-        # that just gives up is correct, not a bug to retry harder on.
-        await date_el.wait_for(state="attached", timeout=1500)
-        attr_value = await date_el.get_attribute("datetime")
-        if attr_value:
-            date_posted_raw = attr_value
-            date_posted = _parse_date(attr_value)
-        else:
-            # No machine-readable datetime= at all on this listing — only a
-            # human relative-time badge ("1 day ago", "3w"). Confirmed live
-            # during Phase 2 testing; not every job card has the attribute.
-            text_value = (await date_el.inner_text()).strip()
-            if text_value:
-                date_posted_raw = text_value
-                date_posted = _parse_relative_time(text_value)
-    except Exception:
-        pass
-
-    # Click through to load (or, on a real search-results page, swap) the
-    # description panel for this specific job. Waiting for the ELEMENT to
-    # exist is not enough — it's a persistent panel that already exists from
-    # the previous job, so that wait resolves instantly without the new
-    # job's content having loaded yet (confirmed live: several jobs came
-    # back with only "About the job" and nothing else). Wait for the text to
-    # actually CHANGE instead.
-    description_before = (await _text_or_none(page.locator(selectors.DESCRIPTION))) or ""
-    await link_el.click()
-    try:
-        await page.wait_for_function(
-            """([sel, before]) => {
-                const el = document.querySelector(sel);
-                const text = el ? el.innerText.trim() : '';
-                return text.length > 20 && text !== before;
-            }""",
-            arg=[selectors.DESCRIPTION, description_before],
-            timeout=8000,
-        )
-    except Exception:
-        logger.warning(f"[linkedin] description panel did not update for {link}")
-
-    description = await _text_or_none(page.locator(selectors.DESCRIPTION)) or ""
-
-    return RawJob(
-        title=title,
-        company=company,
-        location=place,
-        link=link,
-        description=description,
-        date_posted_raw=date_posted_raw,
-        date_posted=date_posted,
-        is_promoted=promoted,
+    return Query(
+        query=config.query,
+        options=QueryOptions(
+            locations=config.locations or [],
+            limit=config.limit,
+            apply_link=True,
+            skip_promoted_jobs=True,
+            filters=QueryFilters(
+                relevance=_RELEVANCE.get(f.get("relevance", "RECENT"), RelevanceFilters.RECENT),
+                time=_TIME.get(f.get("time", "MONTH"), TimeFilters.MONTH),
+                type=type_filters,
+                experience=exp_filters,
+                on_site_or_remote=remote_filters,
+            ),
+        ),
     )
+
+
+def _kill_browser_descendants() -> None:
+    """Blunt, OS-level force-stop for a Stop click — see this module's
+    docstring for why nothing gentler exists. Only touches chromedriver/
+    chrome processes that are actual descendants of THIS worker process
+    (never anything else on the machine, including a real Chrome the user
+    has open themselves), since Selenium always spawns chromedriver as a
+    direct child of the process that created the webdriver."""
+    try:
+        import psutil
+    except ImportError:
+        logger.warning("[linkedin] psutil not installed — cannot force-stop the browser on cancel")
+        return
+
+    try:
+        me = psutil.Process(os.getpid())
+    except psutil.NoSuchProcess:
+        return
+
+    for child in me.children(recursive=True):
+        try:
+            if child.name().lower().startswith(("chromedriver", "chrome")):
+                child.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+
+_CANCELLED = object()
+
+
+async def _watch_for_cancellation(run_id: Optional[str], queue: "asyncio.Queue", cancelled: dict) -> None:
+    """Runs alongside the scrape, polling ScrapeRun.cancel_requested every 2s
+    (own short-lived DB session each time, same lazy-import pattern as
+    _resolve_li_at_cookie). On seeing it: flip `cancelled["value"]` FIRST
+    (so run_blocking's except-handler, racing this on a different thread,
+    is guaranteed to see it regardless of timing), then force-stop the
+    browser and push _CANCELLED so _iter_jobs's consumer loop stops
+    promptly instead of waiting for whatever's left in the queue (or
+    nothing, if the browser was mid-navigation with no job pending)."""
+    if not run_id:
+        return
+    from app.domain.db import AsyncSessionLocal
+    from app.domain.repository import Repository
+    import uuid as _uuid
+
+    try:
+        while True:
+            await asyncio.sleep(2)
+            async with AsyncSessionLocal() as session:
+                run = await Repository(session).get_scrape_run(_uuid.UUID(run_id))
+            if run is not None and run.cancel_requested:
+                logger.info(f"[linkedin] cancel requested for run={run_id} — force-stopping the browser")
+                cancelled["value"] = True
+                _kill_browser_descendants()
+                await queue.put(_CANCELLED)
+                return
+    except asyncio.CancelledError:
+        return
 
 
 async def _resolve_li_at_cookie() -> str:
     """DB-first (Phase 8: UI-editable via Settings, no worker restart needed
-    to rotate an expired cookie — the previous LI_AT_COOKIE-env-only setup
-    needed one), falling back to the env var for anyone who hasn't set one
-    via the UI yet. Same isolated-import pattern as core/llm.py's
-    _get_active_llm_setting(), for the same reason: a low-level module like
-    this scraper adapter shouldn't hard-depend on the domain/DB layer at
-    import time, only when actually asked to scrape."""
+    to rotate an expired cookie), falling back to the env var. Same
+    isolated-import pattern as core/llm.py's _get_active_llm_setting()."""
+    from app.core.config import get_settings
     from app.domain.db import AsyncSessionLocal
     from app.domain.repository import Repository
 
@@ -266,35 +265,21 @@ class LinkedInScraper:
 
     async def check_credential(self) -> tuple[bool, str]:
         """
-        Optional hook scrape_service.py calls (via hasattr, not a required
-        part of the BaseScraper protocol — testsite has no credential at
-        all) BEFORE starting a run, as a setup-prerequisite check in the
-        same tier as an adapter-connect failure or a resume-parse failure.
+        Optional hook scrape_service.py calls (via hasattr) BEFORE starting a
+        run, as a setup-prerequisite check in the same tier as an
+        adapter-connect failure or a resume-parse failure.
 
-        Deliberately a LOCAL, DB-only lookup — NOT a live Playwright hit
-        against LinkedIn. It was one at first, but that doubled every run's
-        footprint on LinkedIn (one hit for the precheck, one for the actual
-        scrape), which turned out to be a real, live problem: LinkedIn's own
-        session-security systems read "the same session cookie, launching a
-        brand-new browser fingerprint, repeatedly, in a short window" as
-        suspicious multi-device access and force-invalidate the session —
-        independent of the cookie's real 30-day expiry. Doubling that
-        footprint on every single run made actual logouts measurably more
-        frequent. This now only catches a cookie ALREADY KNOWN bad from the
-        last explicit check (Settings page, on save) — no unmeasured cost,
-        still stops a run that's certain to fail before wasting one.
+        Deliberately a LOCAL check only — NOT a live browser hit against
+        LinkedIn (a separate live "is this cookie valid" probe was tried and
+        removed: it was extra, unmeasured account activity on top of
+        whatever the next real scrape does anyway). Only catches "no cookie
+        configured at all" — an actually-bad cookie now surfaces as a real
+        failure on the scrape run itself (adapter.py's _Failed sentinel),
+        with the real error message, instead of a separate probe.
         """
-        from app.domain.db import AsyncSessionLocal
-        from app.domain.repository import Repository
-
         cookie = await _resolve_li_at_cookie()
         if not cookie:
             return False, "No LinkedIn session cookie configured — set one via Settings in the UI (or LI_AT_COOKIE in .env)."
-
-        async with AsyncSessionLocal() as session:
-            credential = await Repository(session).get_scraper_credential("linkedin")
-        if credential and credential.last_check_status == "invalid":
-            return False, "LinkedIn session cookie was last checked as invalid or expired — update it via Settings in the UI."
         return True, ""
 
     async def scrape(self, config: ScrapeConfig) -> AsyncIterator[list[RawJob]]:
@@ -304,85 +289,105 @@ class LinkedInScraper:
                 "No LinkedIn session cookie configured — set one via Settings in the UI (or LI_AT_COOKIE in .env)."
             )
 
-        from app.scrapers.linkedin.browser import launch_linkedin_context
+        async for batch in batched(self._iter_jobs(cookie, config), config.batch_size):
+            yield batch
 
-        async with async_playwright() as pw:
-            # A persistent, volume-backed profile (browser.py's docstring) —
-            # not a fresh incognito-style context per run — so repeated runs
-            # look like one consistent device to LinkedIn instead of a new
-            # one each time.
-            context = await launch_linkedin_context(pw, cookie)
-            try:
-                page = await context.new_page()
-
-                async for batch in batched(self._iter_jobs(page, config), config.batch_size):
-                    yield batch
-            finally:
-                await context.close()
-
-    async def _iter_jobs(self, page: Page, config: ScrapeConfig) -> AsyncIterator[RawJob]:
-        await page.goto(_HOME_URL)
+    async def _iter_jobs(self, cookie: str, config: ScrapeConfig) -> AsyncIterator[RawJob]:
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+        _DONE = object()
         seen_links: set[str] = set()
 
-        for location in config.locations or [""]:
-            if len(seen_links) >= config.limit:
-                return
-            async for raw_job in self._scrape_location(page, config, location):
-                if raw_job.link in seen_links:
-                    continue
-                seen_links.add(raw_job.link)
-                yield raw_job
-                if len(seen_links) >= config.limit:
-                    return
+        class _Failed:
+            """Distinct from _DONE — found live: a fatal library error (e.g.
+            InvalidCookieException) was being logged correctly but then
+            masked by pushing _DONE anyway, so the run reported "completed"
+            with whatever partial results it had instead of "failed". The
+            worker log had the real error; the UI showed a green badge."""
 
-    async def _scrape_location(self, page: Page, config: ScrapeConfig, location: str) -> AsyncIterator[RawJob]:
-        start = 0
-        collected = 0
+            def __init__(self, message: str) -> None:
+                self.message = message
 
-        while collected < config.limit:
-            url = build_search_url(config.query, location, config.filters, start=start)
-            logger.debug(f"[linkedin] opening {url}")
-            await page.goto(url)
+        def _on_data(data: EventData) -> None:
+            link = _canonicalize_link(data.link)
+            raw_date = data.date or None
+            raw = RawJob(
+                title=data.title,
+                company=data.company,
+                location=getattr(data, "place", None) or getattr(data, "location", None),
+                link=link,
+                apply_link=getattr(data, "apply_link", None),
+                description=data.description or "",
+                date_posted_raw=raw_date,
+                date_posted=_parse_date(raw_date) or (_parse_relative_time(raw_date) if raw_date else None),
+            )
+            loop.call_soon_threadsafe(queue.put_nowait, raw)
+
+        def _on_error(error) -> None:
+            logger.warning(f"[linkedin] scraper error: {error}")
+
+        def _on_end() -> None:
+            loop.call_soon_threadsafe(queue.put_nowait, _DONE)
+
+        cancelled = {"value": False}
+
+        def run_blocking() -> None:
+            os.environ["LI_AT_COOKIE"] = cookie
+            # Config.LI_AT_COOKIE is a class attr read at import time by the
+            # library — patch it directly too, same as v1's _set_cookie().
+            LJSConfig.LI_AT_COOKIE = cookie
 
             try:
-                await page.wait_for_selector(selectors.CONTAINER, timeout=8000)
-            except Exception:
-                logger.info(f"[linkedin] no jobs found for query={config.query!r} location={location!r}")
-                return
+                scraper = LinkedinScraper(
+                    chrome_executable_path=ChromeDriverManager().install(),
+                    headless=True,
+                    max_workers=_MAX_WORKERS,
+                    slow_mo=_SLOW_MO,
+                    page_load_timeout=_PAGE_LOAD_TIMEOUT,
+                )
+                scraper.on(Events.DATA, _on_data)
+                scraper.on(Events.ERROR, _on_error)
+                scraper.on(Events.END, _on_end)
+                scraper.run([_build_query(config)])
+            except Exception as e:
+                # Also fires when _watch_for_cancellation kills the browser
+                # out from under this call — that's expected, not a real
+                # failure, so don't push _Failed over a _CANCELLED that may
+                # already be on its way (or arrive after): the `cancelled`
+                # flag lets the consumer loop tell the two apart regardless
+                # of which one it happens to see first.
+                if not cancelled["value"]:
+                    logger.error(f"[linkedin] scraper fatal error: {e}")
+                    loop.call_soon_threadsafe(queue.put_nowait, _Failed(str(e)))
 
-            cards = page.locator(selectors.JOB_CARD)
-            count = await cards.count()
-            if count == 0:
-                return
+        asyncio.create_task(asyncio.to_thread(run_blocking))
+        watcher = asyncio.create_task(_watch_for_cancellation(config.run_id, queue, cancelled))
 
-            for i in range(count):
+        try:
+            collected = 0
+            while True:
+                item = await queue.get()
+                if item is _DONE:
+                    return
+                if item is _CANCELLED:
+                    cancelled["value"] = True
+                    logger.info(f"[linkedin] run={config.run_id} stopped by cancellation")
+                    return
+                if isinstance(item, _Failed):
+                    if cancelled["value"]:
+                        return
+                    # Propagates up through batched() -> scrape() to
+                    # scrape_service.py's run-setup try/except, which marks
+                    # the ScrapeRun "failed" and records the message — same
+                    # tier as an adapter-connect failure or a resume-parse
+                    # failure.
+                    raise RuntimeError(item.message)
+                if item.link in seen_links:
+                    continue
+                seen_links.add(item.link)
+                collected += 1
+                yield item
                 if collected >= config.limit:
                     return
-                try:
-                    raw_job = await extract_job(page, cards.nth(i))
-                except Exception as e:
-                    logger.warning(f"[linkedin] failed to extract job at index {i}: {e}")
-                    # Confirmed live during Phase 2 testing: a job-card click
-                    # can occasionally trigger a full page navigation away
-                    # from the search-results list (not just an in-place
-                    # panel update), which then breaks every subsequent
-                    # locator on this page with "execution context was
-                    # destroyed". Recover by returning to this exact search
-                    # results page/offset rather than letting one bad click
-                    # silently zero out the rest of the batch.
-                    if "execution context was destroyed" in str(e).lower() or "navigat" in str(e).lower():
-                        logger.info(f"[linkedin] recovering: re-opening {url}")
-                        await page.goto(url)
-                        try:
-                            await page.wait_for_selector(selectors.CONTAINER, timeout=8000)
-                        except Exception:
-                            return
-                        cards = page.locator(selectors.JOB_CARD)
-                    continue
-                if raw_job is not None:
-                    collected += 1
-                    yield raw_job
-
-            if count < _PAGE_SIZE:
-                return
-            start += _PAGE_SIZE
+        finally:
+            watcher.cancel()

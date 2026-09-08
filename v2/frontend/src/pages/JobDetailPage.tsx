@@ -1,10 +1,11 @@
-import { ArrowLeft, ExternalLink, RefreshCw, Trash2 } from 'lucide-react'
+import { ArrowLeft, ExternalLink, RefreshCw, Trash2, Zap } from 'lucide-react'
 import { useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { apiErrorMessage } from '@/api/client'
-import { useRunFeature } from '@/api/hooks/useFeatures'
+import { useRunAllFeatures, useRunFeature } from '@/api/hooks/useFeatures'
 import { useDeleteJob, useJob, useUpdateJobStatus } from '@/api/hooks/useJobs'
-import { FEATURES, JOB_STATUSES, type FeatureKey, type FeatureRunResponse } from '@/api/types'
+import { useLLMSetting } from '@/api/hooks/useSettings'
+import { BUNDLED_FEATURES, FEATURES, JOB_STATUSES, type FeatureKey, type FeatureRunResponse } from '@/api/types'
 import { ScoreBadge, StatusBadge } from '@/components/ScoreBadge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -176,13 +177,18 @@ function FeaturePanel({ jobId }: { jobId: string }) {
   const [active, setActive] = useState<FeatureKey>('cover_letter')
   const [results, setResults] = useState<Partial<Record<FeatureKey, FeatureRunResponse>>>({})
   const [tone, setTone] = useState('professional')
+  const [wordCount, setWordCount] = useState(250)
   const [contactName, setContactName] = useState('')
   const [contactTitle, setContactTitle] = useState('')
+  const [channel, setChannel] = useState<'linkedin_connection_note' | 'linkedin_dm'>('linkedin_connection_note')
   const runFeature = useRunFeature()
+  const runAllFeatures = useRunAllFeatures()
+  const { data: llmSetting } = useLLMSetting()
   const push = useToastStore((s) => s.push)
 
   const activeMeta = FEATURES.find((f) => f.key === active)!
   const result = results[active]
+  const allBundledGenerated = BUNDLED_FEATURES.every((f) => results[f])
 
   async function run(regenerate = false) {
     try {
@@ -190,8 +196,10 @@ function FeaturePanel({ jobId }: { jobId: string }) {
         jobId,
         feature: active,
         tone: active === 'cover_letter' ? tone : undefined,
+        word_count: active === 'cover_letter' ? wordCount : undefined,
         contact_name: active === 'referral_message' ? contactName || undefined : undefined,
         contact_title: active === 'referral_message' ? contactTitle || undefined : undefined,
+        channel: active === 'referral_message' ? channel : undefined,
         regenerate,
       })
       setResults((r) => ({ ...r, [active]: data }))
@@ -200,21 +208,95 @@ function FeaturePanel({ jobId }: { jobId: string }) {
     }
   }
 
+  async function runAll(regenerate = false) {
+    try {
+      const data = await runAllFeatures.mutateAsync({ jobId, tone, word_count: wordCount, regenerate })
+      setResults((r) => ({
+        ...r,
+        ...Object.fromEntries(
+          BUNDLED_FEATURES.map((f) => [
+            f,
+            { feature: f, job_id: data.job_id, params: {}, cached: data.cached, result: data.results[f] },
+          ]),
+        ),
+      }))
+      push(data.cached ? 'Loaded from cache — no LLM call needed' : 'Generated cover letter, interview prep, company research, and resume improvement in one call')
+    } catch (e) {
+      push(apiErrorMessage(e), 'error')
+    }
+  }
+
   return (
     <div className="flex flex-col gap-4">
-      <Tabs value={active} onChange={setActive} items={FEATURES.map((f) => ({ value: f.key, label: f.label }))} />
+      <div className="flex items-center justify-between gap-2">
+        <Tabs value={active} onChange={setActive} items={FEATURES.map((f) => ({ value: f.key, label: f.label }))} />
+        {llmSetting && (
+          <span className="whitespace-nowrap text-xs text-muted-foreground" title="Every feature above uses this one model, configured in Settings — never a per-feature override.">
+            Generated with <span className="font-mono">{llmSetting.model}</span>
+          </span>
+        )}
+      </div>
 
-      {active === 'cover_letter' && (
-        <Select value={tone} onChange={(e) => setTone(e.target.value)} className="w-40">
-          <option value="professional">Professional</option>
-          <option value="confident">Confident</option>
-          <option value="friendly">Friendly</option>
-        </Select>
-      )}
+      <div className="flex flex-col gap-2 rounded-md border border-border bg-muted/20 p-3">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div className="flex items-end gap-2">
+            <label className="flex flex-col gap-1 text-xs font-medium text-muted-foreground">
+              Cover letter tone
+              <Select value={tone} onChange={(e) => setTone(e.target.value)} className="w-36">
+                <option value="professional">Professional</option>
+                <option value="confident">Confident</option>
+                <option value="friendly">Friendly</option>
+              </Select>
+            </label>
+            <label className="flex flex-col gap-1 text-xs font-medium text-muted-foreground">
+              Target word count
+              <Input
+                type="number"
+                min={100}
+                max={600}
+                step={25}
+                value={wordCount}
+                onChange={(e) => setWordCount(Number(e.target.value))}
+                className="w-28"
+              />
+            </label>
+          </div>
+          <div className="flex gap-2">
+            <Button size="sm" onClick={() => runAll(false)} disabled={runAllFeatures.isPending}>
+              {runAllFeatures.isPending ? <Spinner /> : <Zap className="size-4" />} Generate All
+            </Button>
+            {allBundledGenerated && (
+              <Button size="sm" variant="outline" onClick={() => runAll(true)} disabled={runAllFeatures.isPending}>
+                <RefreshCw className="size-4" /> Regenerate All
+              </Button>
+            )}
+          </div>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Fills in Cover Letter, Interview Prep, Company Research, and Resume Improvement together — one LLM call, not four.
+        </p>
+      </div>
+
       {active === 'referral_message' && (
-        <div className="flex gap-2">
-          <Input placeholder="Contact name (optional)" value={contactName} onChange={(e) => setContactName(e.target.value)} />
-          <Input placeholder="Contact title (optional)" value={contactTitle} onChange={(e) => setContactTitle(e.target.value)} />
+        <div className="flex flex-col gap-2">
+          <div className="flex gap-4 text-sm">
+            <label className="flex items-center gap-1.5">
+              <input
+                type="radio"
+                checked={channel === 'linkedin_connection_note'}
+                onChange={() => setChannel('linkedin_connection_note')}
+              />
+              Not connected yet — connection request (300 char limit)
+            </label>
+            <label className="flex items-center gap-1.5">
+              <input type="radio" checked={channel === 'linkedin_dm'} onChange={() => setChannel('linkedin_dm')} />
+              Already connected — DM / InMail
+            </label>
+          </div>
+          <div className="flex gap-2">
+            <Input placeholder="Contact name (optional)" value={contactName} onChange={(e) => setContactName(e.target.value)} />
+            <Input placeholder="Contact title (optional)" value={contactTitle} onChange={(e) => setContactTitle(e.target.value)} />
+          </div>
         </div>
       )}
 
@@ -304,16 +386,6 @@ function FeatureResult({ feature, result }: { feature: FeatureKey; result: Recor
         </div>
       )
     }
-    case 'negotiation_prep':
-      return (
-        <div className="flex flex-col gap-2 text-sm">
-          <p>{result.assessment as string}</p>
-          {result.target_ask != null && <p className="font-semibold">Target ask: {result.target_ask as string}</p>}
-          <ListSection title="Talking points" items={result.talking_points as string[]} />
-          <ListSection title="Scripts" items={result.scripts as string[]} />
-          <ListSection title="Risks to avoid" items={result.risks_to_avoid as string[]} />
-        </div>
-      )
     default:
       return <pre className="overflow-x-auto text-xs">{JSON.stringify(result, null, 2)}</pre>
   }

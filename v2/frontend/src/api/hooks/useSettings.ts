@@ -35,12 +35,6 @@ export function useScraperCredential(site: string) {
       if (error) throw error
       return data
     },
-    // Polls briefly after a save (PUT auto-enqueues a validity check on the
-    // worker, Playwright-side — no separate "Test cookie" action needed)
-    // so the Status cell updates on its own a few seconds later. Cheap
-    // enough to just always poll while this query is mounted rather than
-    // switching it on/off around the save mutation.
-    refetchInterval: 3000,
   })
 }
 

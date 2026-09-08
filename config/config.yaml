@@ -14,9 +14,9 @@ queries:
       - "Bangalore, India"
       - "Mumbai, India"
       - "Pune, India"
-      - "Hyderabad, India"
-      - "Noida, India"
-    limit: 60
+      # - "Hyderabad, India"
+      # - "Noida, India"
+    limit: 30
     filters:
       relevance: RECENT
       time: WEEK
@@ -37,8 +37,8 @@ matching:
   score_weights:
     semantic_similarity: 0.40
     skills_overlap: 0.35
-    experience_match: 0.15
-    title_match: 0.10
+    experience_match: 0.3
+    title_match: 0.3
   min_score_threshold: 0.40
   # Jobs requiring more than this many years of experience are skipped during matching.
   # Set to null to disable. Example: 3 discards jobs needing 4+ years.

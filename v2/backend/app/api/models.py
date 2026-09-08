@@ -161,6 +161,7 @@ class RejectedJobResponse(BaseModel):
     company: str
     link: str
     match_score: Optional[float]
+    experience_years_min: Optional[int]
     reason: str
     created_at: datetime
 
@@ -193,7 +194,7 @@ class ScrapeRunResponse(BaseModel):
     jobs_seen: int
     jobs_saved: int
     jobs_rejected: int
-    errors: list
+    errors: list[str]
     started_at: datetime
     finished_at: Optional[datetime]
 
@@ -222,8 +223,6 @@ class ScraperCredentialResponse(BaseModel):
     masked_value: Optional[str] = Field(
         None, description="Last 4 characters only (e.g. '••••••wxyz') — enough to recognize which cookie is stored without exposing it."
     )
-    last_check_status: Optional[str] = Field(None, description="'valid' | 'invalid' | 'error' | null if never checked.")
-    last_checked_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
 
@@ -235,6 +234,7 @@ class ScraperCredentialUpdateRequest(BaseModel):
 
 class FeatureRequestBody(BaseModel):
     tone: Optional[str] = None
+    word_count: Optional[int] = None
     channel: Optional[str] = None
     contact_name: Optional[str] = None
     contact_title: Optional[str] = None
@@ -247,3 +247,15 @@ class FeatureRunResponse(BaseModel):
     params: dict[str, Any]
     cached: bool
     result: dict[str, Any]
+
+
+class AllFeaturesRequestBody(BaseModel):
+    tone: str = "professional"
+    word_count: int = 250
+    regenerate: bool = False
+
+
+class AllFeaturesRunResponse(BaseModel):
+    job_id: str
+    cached: bool
+    results: dict[str, dict[str, Any]]

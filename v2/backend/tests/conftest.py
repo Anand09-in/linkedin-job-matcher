@@ -137,9 +137,11 @@ class _FakeArqRedis:
 
     def __init__(self):
         self.enqueued: list[tuple] = []
+        self.enqueued_queue_names: list[str | None] = []
 
-    async def enqueue_job(self, task_name: str, *args):
+    async def enqueue_job(self, task_name: str, *args, _queue_name: str | None = None, **kwargs):
         self.enqueued.append((task_name, *args))
+        self.enqueued_queue_names.append(_queue_name)
         return type("FakeArqJob", (), {"job_id": "fake-job-id"})()
 
     async def ping(self):

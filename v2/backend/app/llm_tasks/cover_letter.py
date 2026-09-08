@@ -11,10 +11,10 @@ from app.llm_tasks.schemas import CoverLetterResult, JobContext, ResumeContext
 
 
 async def generate_cover_letter(
-    job: JobContext, resume: ResumeContext, tone: str, llm: BaseChatModel
+    job: JobContext, resume: ResumeContext, tone: str, word_count: int, llm: BaseChatModel
 ) -> CoverLetterResult:
     structured_llm = llm.with_structured_output(CoverLetterResult)
-    prompt = build_cover_letter_prompt(job, resume, tone)
+    prompt = build_cover_letter_prompt(job, resume, tone, word_count)
 
     async with llm_semaphore:
         return await structured_llm.ainvoke(

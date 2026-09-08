@@ -234,6 +234,7 @@ class RejectedJob(Base):
     company: Mapped[str] = mapped_column(String(255), nullable=False)
     link: Mapped[str] = mapped_column(Text, nullable=False)
     match_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    experience_years_min: Mapped[int | None] = mapped_column(Integer, nullable=True)
     reason: Mapped[str] = mapped_column(String(100), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -275,13 +276,6 @@ class ScraperCredential(Base):
     # not something to design in blind today.
     site: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
     value: Mapped[str] = mapped_column(Text, nullable=False)
-    # Set by check_scraper_credential_task (worker, Playwright) after a
-    # "Test cookie" request from Settings — the API container has no
-    # Playwright to ask LinkedIn itself (architecture.md: Playwright is
-    # worker-only, ~300MB+ dependency the API doesn't need for anything
-    # else), so this is fire-and-forget + poll, same shape as a scrape run.
-    last_check_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), onupdate=func.now())
 
 

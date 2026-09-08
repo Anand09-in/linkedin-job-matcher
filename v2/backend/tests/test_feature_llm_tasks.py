@@ -6,7 +6,6 @@ from __future__ import annotations
 from app.llm_tasks.company_research import research_company
 from app.llm_tasks.cover_letter import generate_cover_letter
 from app.llm_tasks.interview_prep import generate_interview_prep
-from app.llm_tasks.negotiation_prep import prepare_negotiation
 from app.llm_tasks.referral_message import draft_referral_message
 from app.llm_tasks.resume_improvement import improve_resume
 from app.llm_tasks.schemas import (
@@ -15,7 +14,6 @@ from app.llm_tasks.schemas import (
     InterviewPrepResult,
     InterviewQuestion,
     JobContext,
-    NegotiationPrepResult,
     ReferralMessageResult,
     ResumeContext,
     ResumeImprovementResult,
@@ -63,8 +61,8 @@ def _resume(**overrides) -> ResumeContext:
 
 
 async def test_generate_cover_letter():
-    fake = CoverLetterResult(cover_letter="Paragraph one.\n\nParagraph two.\n\nParagraph three.")
-    result = await generate_cover_letter(_job(), _resume(), "confident", _FakeLLM(fake))
+    fake = CoverLetterResult(cover_letter="Dear Hiring Manager,\n\nParagraph one.\n\nParagraph two.\n\nParagraph three.\n\nSincerely,")
+    result = await generate_cover_letter(_job(), _resume(), "confident", 250, _FakeLLM(fake))
     assert "Paragraph one" in result.cover_letter
 
 
@@ -111,18 +109,6 @@ async def test_draft_referral_message_with_named_contact():
     assert "Jane" in result.message
 
 
-async def test_prepare_negotiation_uses_salary_benchmark():
-    fake = NegotiationPrepResult(
-        assessment="Your 3 years of experience puts you mid-band for this range.",
-        target_ask="1,500,000 INR",
-        talking_points=["Strong Spark experience matches the JD directly."],
-        scripts=["Based on my research, I was expecting a range closer to X."],
-        risks_to_avoid=["Don't give a number before they do."],
-    )
-    result = await prepare_negotiation(_job(), _resume(), _FakeLLM(fake))
-    assert result.target_ask == "1,500,000 INR"
-
-
 def test_interview_prep_drops_truncated_questions_instead_of_raising():
     """Real bug found live (Phase 6): under the default token budget, Mistral
     Large truncated the 9th of 12 questions mid-item, leaving only
@@ -149,16 +135,3 @@ def test_interview_prep_tips_are_capped_independently_of_questions():
     at its own declared limit."""
     result = InterviewPrepResult(questions=[], prep_tips=[f"tip {i}" for i in range(8)])
     assert len(result.prep_tips) == 5
-
-
-async def test_prepare_negotiation_without_a_benchmark_still_returns_a_result():
-    """No salary_benchmark on the job (still pending/failed) is a normal
-    case — the prompt tells the model to give strategy-only advice, not an
-    error; this test just proves the plumbing works with salary_benchmark=None."""
-    fake = NegotiationPrepResult(
-        assessment="No salary data is available yet, so here is general strategy advice instead.",
-        target_ask=None,
-        talking_points=["Anchor on your relevant Spark/Python experience."],
-    )
-    result = await prepare_negotiation(_job(salary_benchmark=None), _resume(), _FakeLLM(fake))
-    assert result.target_ask is None

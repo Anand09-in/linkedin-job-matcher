@@ -122,6 +122,12 @@ export interface paths {
          *     poll GET /scrape/runs?pipeline_id= for progress (FR-1A.6). Triggering
          *     works regardless of the pipeline's `enabled` flag — that flag only gates
          *     the (future) scheduler, not a manual trigger.
+         *
+         *     Enqueued on the dedicated linkedin_scrape_queue_name queue, not arq's
+         *     default — only the native worker (scripts/start_native_worker.ps1)
+         *     listens there, so this can never land on the Docker worker even if it's
+         *     left running (it only serves the default queue, ping/salary lookups).
+         *     See config.py's linkedin_scrape_queue_name docstring for why.
          */
         post: operations["trigger_scrape_scrape_post"];
         delete?: never;
@@ -349,8 +355,8 @@ export interface paths {
         /**
          * Get Scraper Credential
          * @description Never returns the full cookie value — `masked_value` (last 4 chars)
-         *     plus the last check's result/timestamp is enough for the UI to show
-         *     what's stored without exposing the working credential.
+         *     is enough for the UI to show what's stored without exposing the working
+         *     credential.
          */
         get: operations["get_scraper_credential_settings_scraper_credentials__site__get"];
         /**
@@ -359,16 +365,42 @@ export interface paths {
          *     restart (the previous LI_AT_COOKIE-env-only setup needed one to rotate
          *     an expired cookie).
          *
-         *     Also auto-enqueues a validity check (check_scraper_credential_task) right
-         *     away — per explicit user feedback, saving a cookie and finding out
-         *     whether it actually works shouldn't be two separate steps. The response
-         *     still comes back with last_check_status=null (the check runs on the
-         *     worker, in the background); the frontend's poll on GET picks up the
-         *     result a few seconds later, same as it already did for the standalone
-         *     "Test cookie" action this replaces.
+         *     No live validity check on save (removed 2026-09-08, alongside the
+         *     Playwright -> Selenium scraper swap): a separate browser hit against
+         *     LinkedIn just to test the cookie was extra, unmeasured account activity
+         *     on top of whatever the next real scrape does — the same class of
+         *     problem that made scrape_service.py's own precheck a local DB lookup
+         *     instead of a live one. A bad cookie now just fails the next real scrape
+         *     run, with the actual error surfaced on that run (see
+         *     scrape_service.py / adapter.py's _Failed sentinel) instead of a
+         *     separate, LinkedIn-facing "is it valid" probe.
          */
         put: operations["update_scraper_credential_settings_scraper_credentials__site__put"];
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/features/all/{job_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run All On Demand Features
+         * @description Cover letter + interview prep + company research + resume improvement
+         *     in ONE LLM call (2026-09-08, explicit user request — see
+         *     feature_service.run_all_features's docstring). referral_message/
+         *     referral_search stay reachable only through POST /{feature}/{job_id}
+         *     above, unchanged.
+         */
+        post: operations["run_all_on_demand_features_features_all__job_id__post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -392,9 +424,10 @@ export interface paths {
          *     new LLM call, unless `regenerate: true` is passed.
          *
          *     Known features (see feature_service.FEATURES for the authoritative
-         *     list/params): cover_letter (tone), interview_prep, company_research (no
-         *     resume needed), resume_improvement, referral_message (channel,
-         *     contact_name, contact_title), negotiation_prep.
+         *     list/params): cover_letter (tone, word_count), interview_prep,
+         *     company_research (no resume needed), resume_improvement,
+         *     referral_message (channel, contact_name, contact_title), referral_search
+         *     (no resume needed).
          */
         post: operations["run_on_demand_feature_features__feature___job_id__post"];
         delete?: never;
@@ -466,6 +499,37 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AllFeaturesRequestBody */
+        AllFeaturesRequestBody: {
+            /**
+             * Tone
+             * @default professional
+             */
+            tone: string;
+            /**
+             * Word Count
+             * @default 250
+             */
+            word_count: number;
+            /**
+             * Regenerate
+             * @default false
+             */
+            regenerate: boolean;
+        };
+        /** AllFeaturesRunResponse */
+        AllFeaturesRunResponse: {
+            /** Job Id */
+            job_id: string;
+            /** Cached */
+            cached: boolean;
+            /** Results */
+            results: {
+                [key: string]: {
+                    [key: string]: unknown;
+                };
+            };
+        };
         /** Body_create_resume_resumes_post */
         Body_create_resume_resumes_post: {
             /** Name */
@@ -496,6 +560,8 @@ export interface components {
         FeatureRequestBody: {
             /** Tone */
             tone?: string | null;
+            /** Word Count */
+            word_count?: number | null;
             /** Channel */
             channel?: string | null;
             /** Contact Name */
@@ -808,6 +874,8 @@ export interface components {
             link: string;
             /** Match Score */
             match_score: number | null;
+            /** Experience Years Min */
+            experience_years_min: number | null;
             /** Reason */
             reason: string;
             /**
@@ -891,7 +959,7 @@ export interface components {
             /** Jobs Rejected */
             jobs_rejected: number;
             /** Errors */
-            errors: unknown[];
+            errors: string[];
             /**
              * Started At
              * Format: date-time
@@ -939,13 +1007,6 @@ export interface components {
              * @description Last 4 characters only (e.g. '••••••wxyz') — enough to recognize which cookie is stored without exposing it.
              */
             masked_value?: string | null;
-            /**
-             * Last Check Status
-             * @description 'valid' | 'invalid' | 'error' | null if never checked.
-             */
-            last_check_status?: string | null;
-            /** Last Checked At */
-            last_checked_at?: string | null;
             /** Updated At */
             updated_at?: string | null;
         };
@@ -1812,6 +1873,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ScraperCredentialResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    run_all_on_demand_features_features_all__job_id__post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["AllFeaturesRequestBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AllFeaturesRunResponse"];
                 };
             };
             /** @description Validation Error */

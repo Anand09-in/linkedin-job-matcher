@@ -30,6 +30,18 @@ class Settings(BaseSettings):
 
     # ── Task queue / cache (Redis — architecture.md §1) ─────────────────────────
     redis_url: str = Field("redis://redis:6379/0")
+    # A dedicated arq queue for run_scrape_task specifically (2026-09-08, LinkedIn
+    # account-safety incident — see adapter.py's module docstring): the Docker
+    # worker got a real account restricted even after every in-container
+    # mitigation tried; a native Windows process (real Chrome, real fonts/
+    # platform fingerprint, run via the "jobs" conda env — see
+    # scripts/start_native_worker.ps1) proved reliable in a clean, controlled
+    # test where the container consistently wasn't. Routing scrape jobs to
+    # their own queue means the Docker worker (still handling ping/salary
+    # lookups on arq's default queue, unaffected) can never accidentally pick
+    # one up even if it's left running — only a worker explicitly listening on
+    # this queue name (the native process) ever sees a scrape job.
+    linkedin_scrape_queue_name: str = Field("linkedin_native_queue")
 
     # ── LLM — Bedrock only (FR-3, narrowed by explicit user decision: no
     #    Anthropic-direct/OpenAI/Groq/Gemini/Ollama support in v2 at all) ───────
@@ -56,6 +68,17 @@ class Settings(BaseSettings):
     # llm_batch_extract_max_tokens above — its own setting, not a global
     # bump, since most single-feature calls don't need this much room.
     llm_interview_prep_max_tokens: int = Field(4000)
+
+    # The combined on-demand-features call (2026-09-08, explicit user
+    # request: cover_letter + interview_prep + company_research +
+    # resume_improvement in ONE call instead of four) needs headroom for
+    # ALL FOUR structured outputs at once — interview_prep alone already
+    # needs llm_interview_prep_max_tokens; this must cover that plus a full
+    # cover letter, company research writeup, and resume improvement
+    # suggestions in the same response. Its own setting, not a sum of the
+    # others, so it can be tuned independently if truncation shows up live
+    # the way it did for interview_prep alone.
+    llm_all_features_max_tokens: int = Field(8000)
 
     # Cap on concurrent in-flight Bedrock calls across ALL pipelines in this
     # worker process (system-design.md §2.3) — sized conservatively since the

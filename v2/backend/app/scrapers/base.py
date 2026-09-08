@@ -15,7 +15,7 @@ not just assumed, in tests/test_scraper_framework.py.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import AsyncIterator, Protocol, TypeVar
+from typing import AsyncIterator, Optional, Protocol, TypeVar
 
 from pydantic import BaseModel, Field
 
@@ -26,6 +26,13 @@ class ScrapeConfig(BaseModel):
     filters: dict = Field(default_factory=dict)
     batch_size: int = 5
     limit: int = 50
+    # Optional: the ScrapeRun row this config was built for. Not every
+    # adapter needs it — it's here for one whose scrape happens outside this
+    # process's own control flow (e.g. a blocking call handed off to a
+    # background thread) to poll ScrapeRun.cancel_requested itself and
+    # force-stop mid-run, since a Stop click otherwise does nothing until
+    # the next batch happens to arrive.
+    run_id: Optional[str] = None
 
 
 class RawJob(BaseModel):

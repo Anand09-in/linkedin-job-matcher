@@ -84,6 +84,12 @@ export function JobResultsPage() {
             ))}
           </Select>
         </Field>
+        {status === 'rejected' && (
+          <p className="max-w-xs text-xs text-muted-foreground">
+            This is jobs YOU marked "rejected" after reviewing them — jobs a pipeline auto-filtered out during
+            scraping never become Job rows at all; see "Recently rejected jobs" on the Pipelines page for those.
+          </p>
+        )}
         <Field label="Company">
           <Input value={company} onChange={(e) => { setCompany(e.target.value); setOffset(0) }} placeholder="Acme" className="w-36" />
         </Field>
@@ -125,6 +131,7 @@ export function JobResultsPage() {
               <TableHead>Location</TableHead>
               <TableHead>Score</TableHead>
               <TableHead>Status</TableHead>
+              <TableHead>Experience</TableHead>
               <TableHead>Seniority</TableHead>
               <TableHead>Remote</TableHead>
               <TableHead>Posted</TableHead>
@@ -141,6 +148,7 @@ export function JobResultsPage() {
                 <TableCell className="max-w-40 truncate text-muted-foreground">{job.location ?? '—'}</TableCell>
                 <TableCell><ScoreBadge score={job.match_score} /></TableCell>
                 <TableCell><StatusBadge status={job.status} /></TableCell>
+                <TableCell className="text-muted-foreground">{job.experience_years_min != null ? `${job.experience_years_min}+ yrs` : '—'}</TableCell>
                 <TableCell className="text-muted-foreground">{job.seniority_level ?? '—'}</TableCell>
                 <TableCell className="text-muted-foreground">{job.remote_policy ?? '—'}</TableCell>
                 <TableCell className="text-muted-foreground">{formatDate(job.date_posted ?? job.scraped_at)}</TableCell>

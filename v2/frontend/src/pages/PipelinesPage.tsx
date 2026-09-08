@@ -11,7 +11,7 @@ import {
 } from '@/api/hooks/usePipelines'
 import { useResumes } from '@/api/hooks/useResumes'
 import { useCancelScrapeRun, useScrapeRuns, useTriggerScrape } from '@/api/hooks/useScrape'
-import type { Pipeline, PipelineCreateRequest } from '@/api/types'
+import type { Pipeline, PipelineCreateRequest, RejectedJob } from '@/api/types'
 import { RunStatusBadge } from '@/components/ScoreBadge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -203,6 +203,18 @@ function PipelineCard({
   )
 }
 
+function rejectionLabel(r: RejectedJob): string {
+  if (r.reason === 'below_match_score_threshold') {
+    return r.match_score != null ? `below match threshold — scored ${r.match_score.toFixed(2)}` : 'below match threshold'
+  }
+  if (r.reason === 'exceeds_max_experience_years') {
+    return r.experience_years_min != null ? `needs ${r.experience_years_min}+ yrs experience` : 'exceeds max experience'
+  }
+  if (r.reason === 'llm_batch_failed') return 'batch analysis failed'
+  if (r.reason === 'missing_from_llm_response') return 'dropped from LLM response'
+  return r.reason
+}
+
 function PipelineDetails({ pipelineId }: { pipelineId: string }) {
   const { data: runs } = useScrapeRuns(pipelineId, 5)
   const { data: rejected } = useRejectedJobs(pipelineId)
@@ -239,12 +251,19 @@ function PipelineDetails({ pipelineId }: { pipelineId: string }) {
         ) : (
           <ul className="flex flex-col gap-1.5 text-sm">
             {runs.map((run) => (
-              <li key={run.id} className="flex items-center justify-between gap-2">
-                <RunStatusBadge status={run.status} />
-                <span className="text-muted-foreground">
-                  seen {run.jobs_seen} · saved {run.jobs_saved} · rejected {run.jobs_rejected}
-                </span>
-                <span className="text-xs text-muted-foreground">{timeAgo(run.started_at)}</span>
+              <li key={run.id} className="flex flex-col gap-0.5">
+                <div className="flex items-center justify-between gap-2">
+                  <RunStatusBadge status={run.status} />
+                  <span className="text-muted-foreground">
+                    seen {run.jobs_seen} · saved {run.jobs_saved} · rejected {run.jobs_rejected}
+                  </span>
+                  <span className="text-xs text-muted-foreground">{timeAgo(run.started_at)}</span>
+                </div>
+                {run.status === 'failed' && run.errors.length > 0 && (
+                  <p className="truncate text-xs text-destructive" title={run.errors.join('; ')}>
+                    {run.errors[0]}
+                  </p>
+                )}
               </li>
             ))}
           </ul>
@@ -260,7 +279,7 @@ function PipelineDetails({ pipelineId }: { pipelineId: string }) {
             {rejected.slice(0, 5).map((r) => (
               <li key={r.id} className="flex items-center justify-between gap-2">
                 <span className="truncate">{r.title} @ {r.company}</span>
-                <span className="text-xs text-muted-foreground">{r.reason}</span>
+                <span className="text-xs text-muted-foreground">{rejectionLabel(r)}</span>
               </li>
             ))}
           </ul>
@@ -270,12 +289,53 @@ function PipelineDetails({ pipelineId }: { pipelineId: string }) {
   )
 }
 
+// Mirrors adapter.py's _RELEVANCE/_TIME/_TYPE/_EXPERIENCE/_REMOTE maps
+// exactly (which in turn mirror linkedin-jobs-scraper's own filter enums) —
+// these string values are sent to the API as-is and must match those keys
+// or the adapter silently drops the unrecognized one.
+const RELEVANCE_OPTIONS = ['RECENT', 'RELEVANT'] as const
+const TIME_OPTIONS = ['DAY', 'WEEK', 'MONTH', 'ANY'] as const
+const TYPE_OPTIONS = ['FULL_TIME', 'PART_TIME', 'CONTRACT', 'TEMPORARY', 'INTERNSHIP'] as const
+const EXPERIENCE_OPTIONS = ['INTERNSHIP', 'ENTRY_LEVEL', 'ASSOCIATE', 'MID_SENIOR', 'DIRECTOR', 'EXECUTIVE'] as const
+const REMOTE_OPTIONS = ['ON_SITE', 'REMOTE', 'HYBRID'] as const
+
+function labelize(value: string): string {
+  return value.split('_').map((w) => w[0] + w.slice(1).toLowerCase()).join(' ')
+}
+
+function CheckboxGroup({
+  label, options, value, onChange,
+}: {
+  label: string
+  options: readonly string[]
+  value: string[]
+  onChange: (next: string[]) => void
+}) {
+  return (
+    <Field label={label}>
+      <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+        {options.map((opt) => (
+          <label key={opt} className="flex items-center gap-1.5 text-sm">
+            <Checkbox
+              checked={value.includes(opt)}
+              onChange={(e) => onChange(e.target.checked ? [...value, opt] : value.filter((v) => v !== opt))}
+            />
+            {labelize(opt)}
+          </label>
+        ))}
+      </div>
+    </Field>
+  )
+}
+
 function PipelineFormDialog({ pipeline, onClose }: { pipeline?: Pipeline; onClose: () => void }) {
   const isEdit = !!pipeline
   const { data: resumes } = useResumes()
   const createPipeline = useCreatePipeline()
   const updatePipeline = useUpdatePipeline()
   const push = useToastStore((s) => s.push)
+
+  const existingFilters = (pipeline?.filters ?? {}) as Record<string, unknown>
 
   const [name, setName] = useState(pipeline?.name ?? '')
   const [site, setSite] = useState(pipeline?.site ?? 'linkedin')
@@ -287,6 +347,11 @@ function PipelineFormDialog({ pipeline, onClose }: { pipeline?: Pipeline; onClos
   const [maxExperience, setMaxExperience] = useState(pipeline?.max_experience_years_override?.toString() ?? '')
   const [enabled, setEnabled] = useState(pipeline?.enabled ?? true)
   const [scheduleCron, setScheduleCron] = useState(pipeline?.schedule_cron ?? '')
+  const [relevance, setRelevance] = useState((existingFilters.relevance as string) ?? 'RECENT')
+  const [time, setTime] = useState((existingFilters.time as string) ?? 'MONTH')
+  const [type, setType] = useState<string[]>((existingFilters.type as string[]) ?? [])
+  const [experience, setExperience] = useState<string[]>((existingFilters.experience as string[]) ?? [])
+  const [remote, setRemote] = useState<string[]>((existingFilters.on_site_or_remote as string[]) ?? [])
 
   const isPending = createPipeline.isPending || updatePipeline.isPending
 
@@ -303,6 +368,7 @@ function PipelineFormDialog({ pipeline, onClose }: { pipeline?: Pipeline; onClos
       max_experience_years_override: maxExperience ? Number(maxExperience) : null,
       enabled,
       schedule_cron: scheduleCron || null,
+      filters: { relevance, time, type, experience, on_site_or_remote: remote },
     }
     try {
       if (isEdit) {
@@ -340,6 +406,21 @@ function PipelineFormDialog({ pipeline, onClose }: { pipeline?: Pipeline; onClos
             rows={3}
           />
         </Field>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Relevance">
+            <Select value={relevance} onChange={(e) => setRelevance(e.target.value)}>
+              {RELEVANCE_OPTIONS.map((o) => <option key={o} value={o}>{labelize(o)}</option>)}
+            </Select>
+          </Field>
+          <Field label="Posted within">
+            <Select value={time} onChange={(e) => setTime(e.target.value)}>
+              {TIME_OPTIONS.map((o) => <option key={o} value={o}>{labelize(o)}</option>)}
+            </Select>
+          </Field>
+        </div>
+        <CheckboxGroup label="Employment type" options={TYPE_OPTIONS} value={type} onChange={setType} />
+        <CheckboxGroup label="Experience level" options={EXPERIENCE_OPTIONS} value={experience} onChange={setExperience} />
+        <CheckboxGroup label="On-site / remote" options={REMOTE_OPTIONS} value={remote} onChange={setRemote} />
         <Field label="Resume (leave empty for extract-only mode)">
           <Select value={resumeId} onChange={(e) => setResumeId(e.target.value)}>
             <option value="">No resume — extract only</option>

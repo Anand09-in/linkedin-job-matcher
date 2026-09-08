@@ -1,4 +1,4 @@
-import { CheckCircle2, HelpCircle, XCircle } from 'lucide-react'
+import { Pencil } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { apiErrorMessage } from '@/api/client'
 import {
@@ -26,6 +26,7 @@ export function SettingsPage() {
   const updateSetting = useUpdateLLMSetting()
   const push = useToastStore((s) => s.push)
 
+  const [editing, setEditing] = useState(false)
   const [model, setModel] = useState('')
   const [temperature, setTemperature] = useState(0.1)
   const [maxTokens, setMaxTokens] = useState(2000)
@@ -51,42 +52,78 @@ export function SettingsPage() {
       </div>
 
       <Card>
-        <CardHeader><CardTitle>Active LLM</CardTitle></CardHeader>
-        <CardContent>
-          <form
-            className="flex flex-col gap-3"
-            onSubmit={async (e) => {
-              e.preventDefault()
-              try {
-                await updateSetting.mutateAsync({ provider: 'bedrock', model, temperature, max_tokens: maxTokens })
-                push('Settings updated — takes effect on the next call, no restart needed')
-              } catch (err) {
-                push(apiErrorMessage(err), 'error')
-              }
-            }}
-          >
-            <div className="flex flex-col gap-1">
-              <Label htmlFor="model">Bedrock model ID</Label>
-              <Input id="model" value={model} onChange={(e) => setModel(e.target.value)} list="model-options" required />
-              <datalist id="model-options">
-                {COMMON_MODELS.map((m) => <option key={m} value={m} />)}
-              </datalist>
-              <p className="text-xs text-muted-foreground">Must be a model your AWS account has Bedrock Marketplace access to.</p>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="flex flex-col gap-1">
-                <Label htmlFor="temperature">Temperature</Label>
-                <Input id="temperature" type="number" min={0} max={1} step={0.05} value={temperature} onChange={(e) => setTemperature(Number(e.target.value))} />
-              </div>
-              <div className="flex flex-col gap-1">
-                <Label htmlFor="max-tokens">Max tokens</Label>
-                <Input id="max-tokens" type="number" min={256} step={256} value={maxTokens} onChange={(e) => setMaxTokens(Number(e.target.value))} />
-              </div>
-            </div>
-            <Button type="submit" disabled={updateSetting.isPending} className="w-fit">
-              {updateSetting.isPending ? <Spinner /> : null} Save
+        <CardHeader className="flex flex-row items-center justify-between">
+          <CardTitle>Active LLM</CardTitle>
+          {!editing && (
+            <Button variant="outline" size="sm" onClick={() => setEditing(true)}>
+              <Pencil className="size-4" /> Edit
             </Button>
-          </form>
+          )}
+        </CardHeader>
+        <CardContent>
+          {!editing ? (
+            <div className="grid grid-cols-3 gap-x-4 gap-y-1 rounded-md border border-border bg-muted/30 p-3 text-sm">
+              <span className="text-xs font-semibold uppercase text-muted-foreground">Model</span>
+              <span className="text-xs font-semibold uppercase text-muted-foreground">Temperature</span>
+              <span className="text-xs font-semibold uppercase text-muted-foreground">Max tokens</span>
+              <span className="font-mono">{setting?.model}</span>
+              <span>{setting?.temperature}</span>
+              <span>{setting?.max_tokens}</span>
+            </div>
+          ) : (
+            <form
+              className="flex flex-col gap-3"
+              onSubmit={async (e) => {
+                e.preventDefault()
+                try {
+                  await updateSetting.mutateAsync({ provider: 'bedrock', model, temperature, max_tokens: maxTokens })
+                  push('Settings updated — takes effect on the next call, no restart needed')
+                  setEditing(false)
+                } catch (err) {
+                  push(apiErrorMessage(err), 'error')
+                }
+              }}
+            >
+              <div className="flex flex-col gap-1">
+                <Label htmlFor="model">Bedrock model ID</Label>
+                <Input id="model" value={model} onChange={(e) => setModel(e.target.value)} list="model-options" required />
+                <datalist id="model-options">
+                  {COMMON_MODELS.map((m) => <option key={m} value={m} />)}
+                </datalist>
+                <p className="text-xs text-muted-foreground">Must be a model your AWS account has Bedrock Marketplace access to.</p>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="flex flex-col gap-1">
+                  <Label htmlFor="temperature">Temperature</Label>
+                  <Input id="temperature" type="number" min={0} max={1} step={0.05} value={temperature} onChange={(e) => setTemperature(Number(e.target.value))} />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <Label htmlFor="max-tokens">Max tokens</Label>
+                  <Input id="max-tokens" type="number" min={256} step={256} value={maxTokens} onChange={(e) => setMaxTokens(Number(e.target.value))} />
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <Button type="submit" disabled={updateSetting.isPending} className="w-fit">
+                  {updateSetting.isPending ? <Spinner /> : null} Save
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="w-fit"
+                  onClick={() => {
+                    if (setting) {
+                      setModel(setting.model)
+                      setTemperature(setting.temperature)
+                      setMaxTokens(setting.max_tokens)
+                    }
+                    setEditing(false)
+                  }}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </form>
+          )}
         </CardContent>
       </Card>
 
@@ -108,22 +145,20 @@ function LinkedInSessionCard() {
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
         <p className="text-sm text-muted-foreground">
-          The <code>li_at</code> session cookie LinkedIn pipelines scrape with. Expires roughly every 30 days — when it
-          does, LinkedIn silently serves the logged-out public search page instead of erroring, so a run just quietly
-          finds nothing. Update it here any time, no restart needed.
+          The <code>li_at</code> session cookie LinkedIn pipelines scrape with. Expires roughly every 30 days — a
+          run against an expired or invalid cookie now fails with the real error shown on that run (Pipelines page).
+          Update it here any time, no restart needed.
         </p>
 
         {!isLoading && credential && (
           !credential.configured ? (
             <p className="text-sm text-muted-foreground">No cookie configured yet.</p>
           ) : (
-            <div className="grid grid-cols-3 gap-x-4 gap-y-1 rounded-md border border-border bg-muted/30 p-3 text-sm">
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1 rounded-md border border-border bg-muted/30 p-3 text-sm">
               <span className="text-xs font-semibold uppercase text-muted-foreground">Cookie</span>
               <span className="text-xs font-semibold uppercase text-muted-foreground">Saved</span>
-              <span className="text-xs font-semibold uppercase text-muted-foreground">Status</span>
               <span className="font-mono">{credential.masked_value}</span>
               <span>{timeAgo(credential.updated_at)}</span>
-              <CheckStatus status={credential.last_check_status} checkedAt={credential.last_checked_at} />
             </div>
           )
         )}
@@ -136,7 +171,7 @@ function LinkedInSessionCard() {
             try {
               await updateCredential.mutateAsync(cookie)
               setCookie('')
-              push('LinkedIn cookie saved — checking it against LinkedIn now, status updates below in a few seconds')
+              push('LinkedIn cookie saved')
             } catch (err) {
               push(apiErrorMessage(err), 'error')
             }
@@ -160,15 +195,4 @@ function LinkedInSessionCard() {
       </CardContent>
     </Card>
   )
-}
-
-function CheckStatus({ status, checkedAt }: { status?: string | null; checkedAt?: string | null }) {
-  if (!status) return <span className="flex items-center gap-1 text-muted-foreground"><HelpCircle className="size-4" /> Not tested yet</span>
-  if (status === 'valid') {
-    return <span className="flex items-center gap-1 text-success"><CheckCircle2 className="size-4" /> Valid (checked {timeAgo(checkedAt)})</span>
-  }
-  if (status === 'invalid') {
-    return <span className="flex items-center gap-1 text-destructive"><XCircle className="size-4" /> Invalid or expired (checked {timeAgo(checkedAt)})</span>
-  }
-  return <span className="flex items-center gap-1 text-warning"><HelpCircle className="size-4" /> Check failed — try again (checked {timeAgo(checkedAt)})</span>
 }

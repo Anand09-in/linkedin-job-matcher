@@ -87,7 +87,15 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  # ── arq worker ────────────────────────────────────────────────────────────────
+  # ── arq worker — ping/salary lookups only, not LinkedIn scraping (2026-09-08:
+  #    see backend/app/core/config.py's linkedin_scrape_queue_name docstring and
+  #    scripts/start_native_worker.ps1). This container listens on arq's default
+  #    queue; run_scrape_task is enqueued on a separate, dedicated queue that
+  #    only the native worker script listens to, so this one structurally can't
+  #    pick up a scrape job even though the code is still capable of running
+  #    one — nothing routes it here anymore. Keep this running for ping/salary;
+  #    also start scripts/start_native_worker.ps1 separately for scrape runs
+  #    to actually process. ────────────────────────────────────────────────────
   worker:
     build:
       context: ./backend
@@ -97,17 +105,6 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-job_matcher}
       REDIS_URL: redis://redis:6379/0
-    volumes:
-      # A persistent Playwright browser profile for the LinkedIn adapter
-      # (app/scrapers/linkedin/) — added after a real, live problem: a fresh
-      # `browser.new_context()` on every single scrape/cookie-check looked
-      # to LinkedIn like the same session cookie logging in from a
-      # different device each time, which is exactly the pattern their
-      # security systems force-invalidate sessions over. A named volume
-      # keeps the same profile (cookies, storage, fingerprint-relevant
-      # state) across runs AND across container restarts, so it reads as
-      # one consistent device instead of a new one every time.
-      - jm2_linkedin_profile:/data/linkedin-profile
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -141,6 +138,4 @@ services:
 
 volumes:
   jm2_postgres_data:
-    driver: local
-  jm2_linkedin_profile:
     driver: local

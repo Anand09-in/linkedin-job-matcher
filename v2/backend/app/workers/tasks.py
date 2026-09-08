@@ -84,36 +84,3 @@ async def salary_lookup_task(ctx, job_id: str) -> dict:
             logger.error(f"[salary_lookup_task] failed for job={job.id}: {e}")
             await repo.update_job_salary_benchmark(job.id, {}, status="failed")
             return {"job_id": job_id, "status": "failed", "error": str(e)}
-
-
-async def check_scraper_credential_task(ctx, site: str) -> dict:
-    """
-    "Test cookie" action (Settings page, Phase 8) — only the worker image
-    has Playwright, so this is fire-and-forget from the API (POST
-    /settings/{site}/check) with the frontend polling GET /settings/{site}
-    for last_check_status, same shape as a scrape run. 'error' (a real
-    exception, e.g. network failure) is a distinct status from 'invalid'
-    (LinkedIn reachable, cookie just doesn't authenticate) — the UI should
-    say something different for each rather than collapsing them.
-    """
-    async with AsyncSessionLocal() as session:
-        repo = Repository(session)
-        credential = await repo.get_scraper_credential(site)
-        if credential is None:
-            raise ValueError(f"No credential configured for site={site!r}")
-
-        if site != "linkedin":
-            raise ValueError(f"No cookie-validity check implemented for site={site!r}")
-
-        from app.scrapers.linkedin.cookie_check import check_cookie_valid
-
-        try:
-            valid = await check_cookie_valid(credential.value)
-            status = "valid" if valid else "invalid"
-        except Exception as e:
-            logger.error(f"[check_scraper_credential_task] site={site} check errored: {e}")
-            status = "error"
-
-        await repo.record_scraper_credential_check(site, status)
-        logger.info(f"[check_scraper_credential_task] site={site} status={status}")
-        return {"site": site, "status": status}

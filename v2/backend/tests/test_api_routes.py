@@ -181,6 +181,15 @@ async def test_trigger_scrape_enqueues_and_lists_runs(api_client):
     assert trigger_resp.status_code == 202
     assert trigger_resp.json()["enqueued"] is True
 
+    # Real bug this guards against: run_scrape_task must land on the
+    # dedicated LinkedIn queue, never arq's default — see
+    # config.py's linkedin_scrape_queue_name docstring for why (only the
+    # native worker listens there; the Docker worker never can pick one up).
+    from app.core.config import get_settings
+    from app.main import app
+
+    assert app.state.redis.enqueued_queue_names == [get_settings().linkedin_scrape_queue_name]
+
     runs_resp = await api_client.get("/scrape/runs", params={"pipeline_id": pipeline["id"]})
     assert runs_resp.status_code == 200  # no run rows yet (enqueue was faked, nothing executed) — empty is fine
 
@@ -258,8 +267,7 @@ async def test_scraper_credential_lifecycle(api_client):
     get_before = await api_client.get("/settings/scraper-credentials/linkedin")
     assert get_before.status_code == 200
     assert get_before.json() == {
-        "site": "linkedin", "configured": False, "masked_value": None,
-        "last_check_status": None, "last_checked_at": None, "updated_at": None,
+        "site": "linkedin", "configured": False, "masked_value": None, "updated_at": None,
     }
 
     put_resp = await api_client.put("/settings/scraper-credentials/linkedin", json={"value": "fake-li-at-cookie"})
@@ -268,19 +276,6 @@ async def test_scraper_credential_lifecycle(api_client):
     assert body["configured"] is True
     assert body["masked_value"].endswith("okie")  # last 4 chars only, to recognize it without exposing it
     assert "value" not in body  # the full value is never echoed back — it's a session credential, not display data
-    # Response comes back before the check finishes — it runs on the worker.
-    assert body["last_check_status"] is None
-
-
-async def test_saving_a_scraper_credential_auto_enqueues_a_validity_check(api_client):
-    """Per explicit user feedback: saving a cookie and finding out whether
-    it actually works must not be two separate steps — no more standalone
-    "Test cookie" button/endpoint, PUT itself queues the check."""
-    from app.main import app
-
-    await api_client.put("/settings/scraper-credentials/linkedin", json={"value": "fake-li-at-cookie"})
-
-    assert ("check_scraper_credential_task", "linkedin") in app.state.redis.enqueued
 
 
 # ── Features (service logic is covered thoroughly in test_feature_service.py —

@@ -389,6 +389,7 @@ class Repository:
         link: str,
         reason: str,
         match_score: Optional[float] = None,
+        experience_years_min: Optional[int] = None,
     ) -> RejectedJob:
         rejected = RejectedJob(
             scrape_run_id=scrape_run_id,
@@ -397,6 +398,7 @@ class Repository:
             company=company,
             link=link,
             match_score=match_score,
+            experience_years_min=experience_years_min,
             reason=reason,
         )
         self._s.add(rejected)
@@ -502,15 +504,10 @@ class Repository:
         return result.scalar_one_or_none()
 
     async def set_scraper_credential(self, site: str, value: str) -> ScraperCredential:
-        """Upsert, like set_active_llm_setting — one row per site. Resets
-        last_check_status/last_checked_at: a freshly-pasted cookie hasn't
-        been tested yet, so any stale prior result must not linger and look
-        current in the UI."""
+        """Upsert, like set_active_llm_setting — one row per site."""
         existing = await self.get_scraper_credential(site)
         if existing:
             existing.value = value
-            existing.last_check_status = None
-            existing.last_checked_at = None
             existing.updated_at = datetime.now(timezone.utc)
             await self._s.commit()
             await self._s.refresh(existing)
@@ -521,18 +518,3 @@ class Repository:
         await self._s.commit()
         await self._s.refresh(credential)
         return credential
-
-    async def record_scraper_credential_check(self, site: str, status: str) -> Optional[ScraperCredential]:
-        """Called by check_scraper_credential_task (worker) after actually
-        asking LinkedIn whether the cookie still authenticates. Returns None
-        if the credential was deleted/replaced between the check starting
-        and finishing, rather than resurrecting a row for a site that no
-        longer has one — `status` is one of 'valid'/'invalid'/'error'."""
-        existing = await self.get_scraper_credential(site)
-        if existing is None:
-            return None
-        existing.last_check_status = status
-        existing.last_checked_at = datetime.now(timezone.utc)
-        await self._s.commit()
-        await self._s.refresh(existing)
-        return existing

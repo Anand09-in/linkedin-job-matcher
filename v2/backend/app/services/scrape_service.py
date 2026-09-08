@@ -174,6 +174,7 @@ async def run_scrape_pipeline(
         locations=pipeline.locations,
         filters=pipeline.filters,
         batch_size=pipeline.batch_size,
+        run_id=str(run.id),
     )
     if limit is not None:
         config_kwargs["limit"] = limit
@@ -187,7 +188,9 @@ async def run_scrape_pipeline(
     jobs_seen = jobs_saved = jobs_rejected = 0
     errors: list[str] = []
 
-    async def _reject(raw_job: RawJob, reason: str, score: Optional[float] = None) -> None:
+    async def _reject(
+        raw_job: RawJob, reason: str, score: Optional[float] = None, experience_years_min: Optional[int] = None
+    ) -> None:
         nonlocal jobs_rejected
         await repo.create_rejected_job(
             scrape_run_id=run.id,
@@ -196,6 +199,7 @@ async def run_scrape_pipeline(
             company=raw_job.company,
             link=raw_job.link,
             match_score=score,
+            experience_years_min=experience_years_min,
             reason=reason,
         )
         jobs_rejected += 1
@@ -266,6 +270,7 @@ async def run_scrape_pipeline(
                         raw_job,
                         _rejection_reason(result, min_score, max_experience),
                         score=result.match_score,
+                        experience_years_min=result.experience_years_min,
                     )
                     continue
 
@@ -299,6 +304,25 @@ async def run_scrape_pipeline(
         await repo.finish_scrape_run(run.id, status="failed")
         return {
             "run_id": run.id, "status": "failed",
+            "jobs_seen": jobs_seen, "jobs_saved": jobs_saved, "jobs_rejected": jobs_rejected,
+            "errors": errors,
+        }
+
+    # The adapter itself can now force-stop mid-run (LinkedInScraper kills
+    # its own browser process on seeing cancel_requested, rather than
+    # waiting for us to notice between batches — see adapter.py's module
+    # docstring). When it does, scraper.scrape() just ends its generator
+    # early, same as reaching the end normally — so this is the one place
+    # left that can tell "stopped early because cancelled" apart from
+    # "genuinely finished": re-check cancel_requested one last time before
+    # declaring victory, not just inside the loop above.
+    current = await repo.get_scrape_run(run.id)
+    if current is not None and current.cancel_requested:
+        logger.info(f"[scrape_service] run={run.id} cancelled by request")
+        await repo.update_scrape_run(run.id, errors=errors)
+        await repo.finish_scrape_run(run.id, status="cancelled")
+        return {
+            "run_id": run.id, "status": "cancelled",
             "jobs_seen": jobs_seen, "jobs_saved": jobs_saved, "jobs_rejected": jobs_rejected,
             "errors": errors,
         }

@@ -1,3 +1,7 @@
+# ── Local-only Docker Compose overrides (never committed) ──────────────────────
+docker-compose.override.yml
+v2/.venv-native-worker/
+
 # ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]

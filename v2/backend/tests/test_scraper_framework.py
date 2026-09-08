@@ -35,11 +35,11 @@ async def test_batched_empty_stream_yields_nothing():
 
 async def test_two_independent_adapters_are_both_registered_with_no_special_casing():
     """The real cross-adapter proof — bootstrap() pulls in linkedin/adapter.py,
-    which needs Playwright. That's only installed in the worker image
-    (requirements-worker.txt), so this test only runs meaningfully there;
-    it skips (not fails) in the api image, which deliberately doesn't carry
-    that dependency."""
-    pytest.importorskip("playwright", reason="linkedin adapter needs Playwright — run via the worker image")
+    which needs linkedin-jobs-scraper/selenium. Those are only installed in
+    the worker image (requirements-worker.txt), so this test only runs
+    meaningfully there; it skips (not fails) in the api image, which
+    deliberately doesn't carry that dependency."""
+    pytest.importorskip("linkedin_jobs_scraper", reason="linkedin adapter needs linkedin-jobs-scraper — run via the worker image")
     from app.scrapers.bootstrap import bootstrap
 
     bootstrap()

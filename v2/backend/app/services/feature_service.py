@@ -1,17 +1,18 @@
 """
 On-demand features (FR-6, Phase 6) — cover letter, interview prep, company
-research, resume improvement, plus two added alongside this phase per user
-request: referral outreach message (pairs with Phase 4's referral_service.py,
-which only surfaces contacts, never drafts outreach) and negotiation prep
-(pairs with Phase 4's automatic salary_service.py enrichment, reusing the
-Job.salary_benchmark it already computed rather than searching again).
-A 7th, `referral_search`, was added in Phase 7 when retiring `/debug/*`
+research, resume improvement, plus referral outreach message (pairs with
+Phase 4's referral_service.py, which only surfaces contacts, never drafts
+outreach), added alongside this phase per user request.
+A 6th, `referral_search`, was added in Phase 7 when retiring `/debug/*`
 endpoints surfaced that Phase 4's actual referral-contact search had no
 real, non-debug replacement — see `_run_referral_search`'s docstring.
 
 ATS scoring and career-path planning from v1's `features/` were deliberately
 NOT ported — dropped by explicit user decision when this phase was scoped,
-not an oversight.
+not an oversight. `negotiation_prep` (originally paired with Phase 4's
+salary_service.py enrichment) was removed post-Phase-8 per explicit user
+feedback: its content didn't vary per job in any way the user found useful,
+so it was cut rather than kept as dead weight.
 
 This module is the ONE place that:
   1. Resolves a job_id into the (JobContext, ResumeContext | None) pair every
@@ -37,14 +38,19 @@ from app.core.config import get_settings
 from app.domain.exceptions import FeatureRequiresResumeError, UnknownFeatureError
 from app.domain.models import Job, Resume
 from app.domain.repository import Repository
+from app.llm_tasks.all_features import generate_all_features
 from app.llm_tasks.company_research import research_company
 from app.llm_tasks.cover_letter import generate_cover_letter
 from app.llm_tasks.interview_prep import generate_interview_prep
-from app.llm_tasks.negotiation_prep import prepare_negotiation
 from app.llm_tasks.referral_message import draft_referral_message
 from app.llm_tasks.resume_improvement import improve_resume
 from app.llm_tasks.schemas import JobContext, ResumeContext, ResumeProfile
 from app.services.referral_service import find_referral_contacts
+
+# The four "generate straight from job+resume" features bundled into one LLM
+# call by run_all_features() below — see AllFeaturesResult's docstring for
+# why referral_message/referral_search are excluded.
+_BUNDLED_FEATURES = ("cover_letter", "interview_prep", "company_research", "resume_improvement")
 
 
 def _job_context(job: Job) -> JobContext:
@@ -62,6 +68,33 @@ def _job_context(job: Job) -> JobContext:
         missing_skills=job.missing_skills or [],
         salary_benchmark=job.salary_benchmark,
     )
+
+
+def _fix_mojibake(text: str) -> str:
+    """
+    Repairs UTF-8 text that a model emitted mis-encoded as cp1252 — confirmed
+    live in a referral_message output ("Zscalerâ€™s" instead
+    of "Zscaler's"): the model apparently reproduced training-data mojibake
+    verbatim for curly apostrophes/quotes/dashes rather than actually
+    mis-decoding bytes on our side (the API layer is UTF-8 end to end).
+    Round-tripping through cp1252-encode -> utf-8-decode only succeeds when
+    the text really is this specific corruption, so this can't misfire on
+    ordinary text.
+    """
+    try:
+        return text.encode("cp1252").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return text
+
+
+def _fix_mojibake_recursive(value: Any) -> Any:
+    if isinstance(value, str):
+        return _fix_mojibake(value)
+    if isinstance(value, list):
+        return [_fix_mojibake_recursive(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _fix_mojibake_recursive(v) for k, v in value.items()}
+    return value
 
 
 def _resume_context(resume: Resume) -> ResumeContext:
@@ -89,7 +122,7 @@ class FeatureSpec:
 
 
 async def _run_cover_letter(job: JobContext, resume: Optional[ResumeContext], llm: BaseChatModel, params: dict) -> BaseModel:
-    return await generate_cover_letter(job, resume, params["tone"], llm)
+    return await generate_cover_letter(job, resume, params["tone"], params["word_count"], llm)
 
 
 async def _run_interview_prep(job: JobContext, resume: Optional[ResumeContext], llm: BaseChatModel, params: dict) -> BaseModel:
@@ -111,10 +144,6 @@ async def _run_referral_message(job: JobContext, resume: Optional[ResumeContext]
     )
 
 
-async def _run_negotiation_prep(job: JobContext, resume: Optional[ResumeContext], llm: BaseChatModel, params: dict) -> BaseModel:
-    return await prepare_negotiation(job, resume, llm)
-
-
 async def _run_referral_search(job: JobContext, resume: Optional[ResumeContext], llm: BaseChatModel, params: dict) -> BaseModel:
     """The actual web search for candidate referral contacts (Phase 4's
     referral_service.py — web-search-only, never LinkedIn scraping, see that
@@ -131,7 +160,7 @@ async def _run_referral_search(job: JobContext, resume: Optional[ResumeContext],
 
 FEATURES: dict[str, FeatureSpec] = {
     "cover_letter": FeatureSpec(
-        needs_resume=True, default_params={"tone": "professional"}, run=_run_cover_letter
+        needs_resume=True, default_params={"tone": "professional", "word_count": 250}, run=_run_cover_letter
     ),
     "interview_prep": FeatureSpec(
         needs_resume=True, default_params={}, run=_run_interview_prep,
@@ -144,7 +173,6 @@ FEATURES: dict[str, FeatureSpec] = {
         default_params={"channel": "linkedin_connection_note", "contact_name": None, "contact_title": None},
         run=_run_referral_message,
     ),
-    "negotiation_prep": FeatureSpec(needs_resume=True, default_params={}, run=_run_negotiation_prep),
     "referral_search": FeatureSpec(needs_resume=False, default_params={}, run=_run_referral_search),
 }
 
@@ -162,13 +190,10 @@ def _params_key(params: dict) -> str:
     return json.dumps(params, sort_keys=True)
 
 
-async def run_feature(
-    repo: Repository, feature: str, job_id: uuid.UUID, raw_params: dict, llm: BaseChatModel, regenerate: bool = False
-) -> dict[str, Any]:
-    if feature not in FEATURES:
-        raise UnknownFeatureError(feature, list(FEATURES.keys()))
-    spec = FEATURES[feature]
-
+async def _resolve_job_and_resume(repo: Repository, job_id: uuid.UUID) -> tuple[Job, Optional[Resume]]:
+    """FR-1A.8: the resume is always the one the job's pipeline was bound
+    to, never a separate "which resume" choice — shared by run_feature()
+    and run_all_features() so there's exactly one place this lookup lives."""
     job = await repo.get_job(job_id)
     if job is None:
         raise LookupError(f"Job {job_id} not found")
@@ -177,7 +202,17 @@ async def run_feature(
     pipeline = await repo.get_pipeline(job.pipeline_id)
     if pipeline and pipeline.resume_id:
         resume = await repo.get_resume(pipeline.resume_id)
+    return job, resume
 
+
+async def run_feature(
+    repo: Repository, feature: str, job_id: uuid.UUID, raw_params: dict, llm: BaseChatModel, regenerate: bool = False
+) -> dict[str, Any]:
+    if feature not in FEATURES:
+        raise UnknownFeatureError(feature, list(FEATURES.keys()))
+    spec = FEATURES[feature]
+
+    job, resume = await _resolve_job_and_resume(repo, job_id)
     if spec.needs_resume and resume is None:
         raise FeatureRequiresResumeError(feature, job_id)
 
@@ -193,7 +228,66 @@ async def run_feature(
     job_ctx = _job_context(job)
     resume_ctx = _resume_context(resume) if resume else None
     result_model = await spec.run(job_ctx, resume_ctx, llm, params)
-    result_dict = result_model.model_dump()
+    result_dict = _fix_mojibake_recursive(result_model.model_dump())
 
     await repo.save_feature_result(job_id, resume_id, feature, params, params_key, result_dict)
     return {"feature": feature, "job_id": str(job_id), "params": params, "cached": False, "result": result_dict}
+
+
+async def run_all_features(
+    repo: Repository, job_id: uuid.UUID, tone: str, word_count: int, llm: BaseChatModel, regenerate: bool = False
+) -> dict[str, Any]:
+    """
+    One combined LLM call for _BUNDLED_FEATURES (2026-09-08, explicit user
+    request) — opening a job's on-demand features costs one LLM call, not
+    four independent ones. referral_message/referral_search stay reachable
+    only through run_feature(), unchanged (see AllFeaturesResult's
+    docstring for why bundling those wouldn't make sense).
+
+    Writes each of the four results into the exact same per-feature
+    FeatureResult cache run_feature() itself reads/writes — same params,
+    same params_key a standalone call for that one feature would use — so
+    a later single-feature "Regenerate" on the Job Detail page keeps
+    working exactly as before and never needs to know this bundled path
+    exists. Symmetrically, if all four are already cached (e.g. a prior
+    bundle call, or someone regenerated each individually) and
+    regenerate=False, this returns the cached bundle with zero LLM calls.
+    """
+    job, resume = await _resolve_job_and_resume(repo, job_id)
+    if resume is None:
+        # All four bundled features need a resume (company_research is the
+        # only individually-resume-optional one of the four, but the
+        # bundle as a whole can't skip it).
+        raise FeatureRequiresResumeError("all_features", job_id)
+
+    resume_id = resume.id
+    per_feature_params = {
+        "cover_letter": _normalize_params("cover_letter", {"tone": tone, "word_count": word_count}),
+        "interview_prep": {},
+        "company_research": {},
+        "resume_improvement": {},
+    }
+    per_feature_keys = {f: _params_key(p) for f, p in per_feature_params.items()}
+
+    if not regenerate:
+        cached_results: Optional[dict[str, dict]] = {}
+        for f in _BUNDLED_FEATURES:
+            cached = await repo.get_cached_feature_result(job_id, resume_id, f, per_feature_keys[f])
+            if cached is None:
+                cached_results = None
+                break
+            cached_results[f] = cached.result
+        if cached_results is not None:
+            return {"job_id": str(job_id), "cached": True, "results": cached_results}
+
+    job_ctx = _job_context(job)
+    resume_ctx = _resume_context(resume)
+    combined = await generate_all_features(job_ctx, resume_ctx, tone, word_count, llm)
+
+    results: dict[str, dict] = {}
+    for f in _BUNDLED_FEATURES:
+        result_dict = _fix_mojibake_recursive(getattr(combined, f).model_dump())
+        await repo.save_feature_result(job_id, resume_id, f, per_feature_params[f], per_feature_keys[f], result_dict)
+        results[f] = result_dict
+
+    return {"job_id": str(job_id), "cached": False, "results": results}

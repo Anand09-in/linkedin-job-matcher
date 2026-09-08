@@ -7,7 +7,7 @@ UI-editable and take effect on the very next scrape run.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends
 
 from app.api.dependencies import get_repo
 from app.api.models import (
@@ -63,37 +63,34 @@ def _credential_response(site: str, credential) -> ScraperCredentialResponse:
     if credential is None:
         return ScraperCredentialResponse(site=site, configured=False)
     return ScraperCredentialResponse(
-        site=site, configured=True, masked_value=_mask(credential.value),
-        last_check_status=credential.last_check_status, last_checked_at=credential.last_checked_at,
-        updated_at=credential.updated_at,
+        site=site, configured=True, masked_value=_mask(credential.value), updated_at=credential.updated_at,
     )
 
 
 @router.get("/scraper-credentials/{site}", response_model=ScraperCredentialResponse)
 async def get_scraper_credential(site: str, repo: Repository = Depends(get_repo)):
     """Never returns the full cookie value — `masked_value` (last 4 chars)
-    plus the last check's result/timestamp is enough for the UI to show
-    what's stored without exposing the working credential."""
+    is enough for the UI to show what's stored without exposing the working
+    credential."""
     return _credential_response(site, await repo.get_scraper_credential(site))
 
 
 @router.put("/scraper-credentials/{site}", response_model=ScraperCredentialResponse)
-async def update_scraper_credential(
-    site: str, body: ScraperCredentialUpdateRequest, request: Request, repo: Repository = Depends(get_repo)
-):
+async def update_scraper_credential(site: str, body: ScraperCredentialUpdateRequest, repo: Repository = Depends(get_repo)):
     """
     Takes effect on the very next scrape run for this site — no worker
     restart (the previous LI_AT_COOKIE-env-only setup needed one to rotate
     an expired cookie).
 
-    Also auto-enqueues a validity check (check_scraper_credential_task) right
-    away — per explicit user feedback, saving a cookie and finding out
-    whether it actually works shouldn't be two separate steps. The response
-    still comes back with last_check_status=null (the check runs on the
-    worker, in the background); the frontend's poll on GET picks up the
-    result a few seconds later, same as it already did for the standalone
-    "Test cookie" action this replaces.
+    No live validity check on save (removed 2026-09-08, alongside the
+    Playwright -> Selenium scraper swap): a separate browser hit against
+    LinkedIn just to test the cookie was extra, unmeasured account activity
+    on top of whatever the next real scrape does — the same class of
+    problem that made scrape_service.py's own precheck a local DB lookup
+    instead of a live one. A bad cookie now just fails the next real scrape
+    run, with the actual error surfaced on that run (see
+    scrape_service.py / adapter.py's _Failed sentinel) instead of a
+    separate, LinkedIn-facing "is it valid" probe.
     """
     updated = await repo.set_scraper_credential(site, body.value)
-    await request.app.state.redis.enqueue_job("check_scraper_credential_task", site)
     return _credential_response(site, updated)

@@ -22,6 +22,11 @@ export const FEATURES = [
   { key: 'resume_improvement', label: 'Resume Improvement', needsResume: true },
   { key: 'referral_search', label: 'Find Referral Contacts', needsResume: false },
   { key: 'referral_message', label: 'Referral Message', needsResume: true },
-  { key: 'negotiation_prep', label: 'Negotiation Prep', needsResume: true },
 ] as const
 export type FeatureKey = (typeof FEATURES)[number]['key']
+
+// Mirrors feature_service.py's _BUNDLED_FEATURES exactly — these four are
+// generated together in one LLM call (POST /features/all/{job_id});
+// referral_search/referral_message stay single-feature calls, see that
+// constant's docstring on the backend for why.
+export const BUNDLED_FEATURES: FeatureKey[] = ['cover_letter', 'interview_prep', 'company_research', 'resume_improvement']

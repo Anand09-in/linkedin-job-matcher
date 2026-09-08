@@ -205,15 +205,25 @@ def _resume_block(resume: ResumeContext) -> str:
 
 COVER_LETTER_SYSTEM_PROMPT = """You are a career coach who writes sharp, memorable cover letters
 that never read like a template. Follow the cover_letter field's own description exactly — it is
-the full spec for structure, length, and banned phrases."""
+the full spec for structure, length, and banned phrases.
+
+Ground every claim ONLY in the candidate material actually given below (the structured profile and
+the raw resume excerpt) and the job description given. If the resume material doesn't contain a
+specific achievement with real numbers/details to draw from, do NOT invent one — write the body
+paragraph around genuine, verifiable substance instead (e.g. the depth/relevance of their actual
+listed skills and summary), and never fabricate a metric, project, or outcome that isn't grounded in
+the text you were given."""
 
 
-def build_cover_letter_prompt(job: JobContext, resume: ResumeContext, tone: str) -> str:
+def build_cover_letter_prompt(job: JobContext, resume: ResumeContext, tone: str, word_count: int) -> str:
     return (
-        f"Write a {tone} cover letter for this application.\n\n"
+        f"Write a {tone} cover letter for this application, targeting approximately {word_count} words "
+        f"in the body (excluding greeting/sign-off).\n\n"
         f"=== JOB ===\n{_job_block(job)}\n"
         f"Skills this candidate already matches on this job: {', '.join(job.matched_skills) or 'none recorded'}\n\n"
-        f"=== CANDIDATE ===\n{_resume_block(resume)}"
+        f"=== CANDIDATE (structured profile) ===\n{_resume_block(resume)}\n\n"
+        f"=== CANDIDATE (raw resume excerpt — the ONLY source for any specific achievement/metric you "
+        f"cite) ===\n{(resume.raw_text or '')[:2500]}\n"
     )
 
 
@@ -263,6 +273,35 @@ def build_resume_improvement_prompt(job: JobContext, resume: ResumeContext) -> s
     )
 
 
+# ── Combined call (2026-09-08, explicit user request): cover_letter +
+#    interview_prep + company_research + resume_improvement in ONE
+#    structured-output call — see AllFeaturesResult's docstring for why
+#    referral_message/referral_search stay separate. ─────────────────────────
+
+ALL_FEATURES_SYSTEM_PROMPT = """You are a career coach, senior hiring manager, and expert resume writer
+helping a job seeker prepare a complete application package for ONE specific job. You will fill in FOUR
+independent sections in this single response — a cover letter, interview prep questions, a candid
+company/role assessment, and resume improvement suggestions. Each section below has its own field
+description with the full spec for that section's content, structure, length, and any banned phrases —
+follow each one exactly, as if that section had been requested completely on its own. Do not let one
+section's tone, phrasing, or content bleed into another, and do not reference the other sections from
+within one (e.g. the cover letter must not mention "as detailed in my resume improvement suggestions")."""
+
+
+def build_all_features_prompt(job: JobContext, resume: ResumeContext, tone: str, word_count: int) -> str:
+    return (
+        f"=== JOB ===\n{_job_block(job)}\n"
+        f"Skills this candidate already matches on this job: {', '.join(job.matched_skills) or 'none recorded'}\n"
+        f"Skills already flagged as MISSING for this job: {', '.join(job.missing_skills) or 'none flagged'}\n\n"
+        f"=== CANDIDATE (structured profile) ===\n{_resume_block(resume)}\n\n"
+        f"=== CANDIDATE (raw resume excerpt — the ONLY source for any specific achievement/metric cited "
+        f"anywhere, e.g. in the cover letter) ===\n{(resume.raw_text or '')[:2500]}\n\n"
+        f"=== COVER LETTER PARAMETERS ===\n"
+        f"Tone: {tone}\n"
+        f"Target length: approximately {word_count} words across its 3 body paragraphs.\n"
+    )
+
+
 REFERRAL_MESSAGE_SYSTEM_PROMPT = """You are helping a job seeker write a short outreach message
 to a potential referral contact. The message must sound like a real person wrote it — specific,
 brief, and genuinely tied to the shared context given, never a generic "I'd love to connect"
@@ -293,27 +332,3 @@ def build_referral_message_prompt(
     )
 
 
-NEGOTIATION_PREP_SYSTEM_PROMPT = """You are a compensation negotiation coach. Given a job's
-estimated salary benchmark (from real web search data, not a guess) and a candidate's experience
-level, help them prepare to negotiate. Ground every talking point in the actual data given — never
-invent a number or achievement that wasn't provided. If the benchmark is missing or low-confidence,
-say so plainly and give strategy-only advice rather than fabricating a figure."""
-
-
-def build_negotiation_prep_prompt(job: JobContext, resume: ResumeContext) -> str:
-    if job.salary_benchmark:
-        sb = job.salary_benchmark
-        benchmark_block = (
-            f"Estimated range: {sb.get('min_amount')}-{sb.get('max_amount')} {sb.get('currency', '')} "
-            f"({sb.get('period', 'annual')})\n"
-            f"Confidence: {sb.get('confidence', 'unknown')}\n"
-            f"Source note: {sb.get('source_note', '')}\n"
-        )
-    else:
-        benchmark_block = "No salary benchmark is available yet for this job — give strategy-only advice, no invented figures.\n"
-
-    return (
-        f"=== JOB ===\n{_job_block(job)}\n"
-        f"=== SALARY BENCHMARK ===\n{benchmark_block}\n"
-        f"=== CANDIDATE ===\n{_resume_block(resume)}"
-    )

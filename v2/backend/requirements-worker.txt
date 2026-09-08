@@ -1,6 +1,21 @@
 # Worker-only additions on top of requirements.txt. Split out so the api/
-# migrate images (which never scrape) don't pay for a ~300MB Chromium
-# download and its OS-level dependencies on every rebuild.
+# migrate images (which never scrape) don't pay for the Chrome download and
+# its OS-level dependencies on every rebuild.
 -r requirements.txt
 
-playwright==1.49.0
+# Switched from Playwright to v1's exact scraping stack (2026-09-08): the
+# hand-rolled Playwright adapter got a real LinkedIn account restricted
+# within minutes of a 5-job test run, even after adding navigator.webdriver
+# spoofing and human-like click pacing. Side-by-side comparison on a second
+# account showed v1's linkedin-jobs-scraper (Selenium + real Chrome, not
+# Playwright's bundled Chromium) scraping 200+ jobs in one run with zero
+# issues. Matches v1's proven-safe config exactly (slow_mo, single worker,
+# page_load_timeout) rather than re-guessing new anti-detection knobs — see
+# app/scrapers/linkedin/adapter.py's module docstring.
+linkedin-jobs-scraper==5.0.2
+selenium==4.41.0
+webdriver-manager==4.0.2
+# Process-tree introspection so a Stop click can actually kill the
+# chromedriver/chrome child processes mid-run — see adapter.py's module
+# docstring: linkedin-jobs-scraper exposes no stop()/cancel() API at all.
+psutil==6.1.1

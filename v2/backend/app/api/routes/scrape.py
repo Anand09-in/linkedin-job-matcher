@@ -13,9 +13,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app.api.dependencies import get_repo
 from app.api.models import ScrapeRunResponse, ScrapeTriggerRequest, ScrapeTriggerResponse
+from app.core.config import get_settings
 from app.domain.repository import Repository
 
 router = APIRouter(prefix="/scrape", tags=["Scrape"])
+settings = get_settings()
 
 
 @router.post("", response_model=ScrapeTriggerResponse, status_code=202)
@@ -25,12 +27,20 @@ async def trigger_scrape(body: ScrapeTriggerRequest, request: Request, repo: Rep
     poll GET /scrape/runs?pipeline_id= for progress (FR-1A.6). Triggering
     works regardless of the pipeline's `enabled` flag — that flag only gates
     the (future) scheduler, not a manual trigger.
+
+    Enqueued on the dedicated linkedin_scrape_queue_name queue, not arq's
+    default — only the native worker (scripts/start_native_worker.ps1)
+    listens there, so this can never land on the Docker worker even if it's
+    left running (it only serves the default queue, ping/salary lookups).
+    See config.py's linkedin_scrape_queue_name docstring for why.
     """
     pipeline = await repo.get_pipeline(body.pipeline_id)
     if pipeline is None:
         raise HTTPException(status_code=404, detail=f"Pipeline {body.pipeline_id} not found")
 
-    job = await request.app.state.redis.enqueue_job("run_scrape_task", str(body.pipeline_id), body.limit)
+    job = await request.app.state.redis.enqueue_job(
+        "run_scrape_task", str(body.pipeline_id), body.limit, _queue_name=settings.linkedin_scrape_queue_name
+    )
     return ScrapeTriggerResponse(enqueued=True, job_id=job.job_id, pipeline_id=body.pipeline_id)
 
 
