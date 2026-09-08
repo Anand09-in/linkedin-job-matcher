@@ -218,7 +218,10 @@ class LLMSettingUpdateRequest(BaseModel):
 
 class ScraperCredentialResponse(BaseModel):
     site: str
-    configured: bool = Field(..., description="Whether a value has been set — the value itself is never echoed back.")
+    configured: bool = Field(..., description="Whether a value has been set — the full value itself is never echoed back.")
+    masked_value: Optional[str] = Field(
+        None, description="Last 4 characters only (e.g. '••••••wxyz') — enough to recognize which cookie is stored without exposing it."
+    )
     last_check_status: Optional[str] = Field(None, description="'valid' | 'invalid' | 'error' | null if never checked.")
     last_checked_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
@@ -226,12 +229,6 @@ class ScraperCredentialResponse(BaseModel):
 
 class ScraperCredentialUpdateRequest(BaseModel):
     value: str = Field(..., min_length=1)
-
-
-class ScraperCredentialCheckResponse(BaseModel):
-    enqueued: bool
-    job_id: str
-    site: str
 
 
 # ── On-demand features (FR-6 — moved here unchanged from Phase 6's main.py) ──

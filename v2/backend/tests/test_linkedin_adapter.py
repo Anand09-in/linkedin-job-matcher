@@ -12,6 +12,7 @@ of `api` deliberately — see requirements-worker.txt). Run with:
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from playwright.async_api import async_playwright
@@ -19,7 +20,7 @@ from playwright.async_api import async_playwright
 from datetime import datetime, timedelta, timezone
 
 from app.scrapers.linkedin import selectors
-from app.scrapers.linkedin.adapter import _canonicalize_link, _parse_relative_time, extract_job
+from app.scrapers.linkedin.adapter import LinkedInScraper, _canonicalize_link, _parse_relative_time, extract_job
 from app.scrapers.linkedin.url_builder import build_search_url
 
 FIXTURE = Path(__file__).parent / "fixtures" / "linkedin_search_page.html"
@@ -179,3 +180,65 @@ def test_build_search_url_ignores_unknown_filter_values():
     a single pipeline's misconfiguration shouldn't take down its scrape run."""
     url = build_search_url("X", "", {"time": "DECADE"}, start=0)
     assert "f_TPR" not in url
+
+
+# ── check_credential (real, live account-safety fix) ─────────────────────────
+#
+# check_credential() (and the _resolve_li_at_cookie() it calls) open their
+# own `async with AsyncSessionLocal() as session:` internally — same
+# lazy-import-respects-source-patch pattern as core/llm.py's
+# _get_active_llm_setting(), so these tests patch app.domain.db's
+# AsyncSessionLocal the same way test_api_routes.py's api_client fixture
+# does, reusing the SAME open `db_session`/`repo` transaction rather than a
+# second real connection possibly bound to the dev database.
+
+
+class _SessionCtx:
+    def __init__(self, session):
+        self._session = session
+
+    async def __aenter__(self):
+        return self._session
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+async def test_check_credential_is_a_local_db_lookup_not_a_live_linkedin_hit(repo, db_session, monkeypatch):
+    """Real bug, found live: this used to make an actual Playwright call to
+    LinkedIn on every single scrape run (doubling every run's footprint,
+    which measurably increased how often a real account got logged out —
+    see check_credential's docstring). It must now be a pure DB lookup: no
+    live check_cookie_valid() call reachable, regardless of what's in the DB."""
+    monkeypatch.setattr(
+        "app.scrapers.linkedin.cookie_check.check_cookie_valid",
+        lambda cookie: (_ for _ in ()).throw(AssertionError("check_credential must not call check_cookie_valid live")),
+    )
+    scraper = LinkedInScraper()
+    await repo.set_scraper_credential("linkedin", "some-cookie")
+
+    with patch("app.domain.db.AsyncSessionLocal", return_value=_SessionCtx(db_session)):
+        # Never checked yet -> not blocked (only a KNOWN-invalid result blocks a run).
+        ok, _ = await scraper.check_credential()
+        assert ok is True
+
+        await repo.record_scraper_credential_check("linkedin", "invalid")
+        ok, message = await scraper.check_credential()
+        assert ok is False
+        assert "invalid" in message.lower()
+
+        await repo.record_scraper_credential_check("linkedin", "valid")
+        ok, _ = await scraper.check_credential()
+        assert ok is True
+
+
+async def test_check_credential_fails_with_no_cookie_configured_anywhere(repo, db_session, monkeypatch):
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "li_at_cookie", "")
+
+    with patch("app.domain.db.AsyncSessionLocal", return_value=_SessionCtx(db_session)):
+        scraper = LinkedInScraper()
+        ok, message = await scraper.check_credential()
+    assert ok is False
+    assert "no linkedin session cookie" in message.lower()

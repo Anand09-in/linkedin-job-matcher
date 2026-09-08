@@ -25,6 +25,10 @@ two known-terminal patterns (below) fixes that, without the opposite risk
 of using `wait_until="networkidle"`: LinkedIn's feed has ongoing background
 polling (notifications, presence) that can keep the network "busy"
 indefinitely and make networkidle never fire at all.
+
+Shares adapter.py's persistent browser profile (browser.py) rather than a
+fresh context of its own — this check and a real scrape should look like
+the same one device to LinkedIn, not two different ones.
 """
 from __future__ import annotations
 
@@ -33,18 +37,16 @@ import re
 from loguru import logger
 from playwright.async_api import async_playwright
 
+from app.scrapers.linkedin.browser import launch_linkedin_context
+
 _FEED_URL = "https://www.linkedin.com/feed/"
 _TERMINAL_URL_PATTERN = re.compile(r"/(feed|login|authwall|checkpoint)")
 
 
 async def check_cookie_valid(cookie: str) -> bool:
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
+        context = await launch_linkedin_context(pw, cookie)
         try:
-            context = await browser.new_context()
-            await context.add_cookies([{
-                "name": "li_at", "value": cookie, "domain": ".www.linkedin.com", "path": "/",
-            }])
             page = await context.new_page()
             await page.goto(_FEED_URL, wait_until="domcontentloaded", timeout=20000)
             try:
@@ -58,4 +60,4 @@ async def check_cookie_valid(cookie: str) -> bool:
             logger.info(f"[linkedin] cookie check: {'valid' if valid else 'invalid/expired'} (landed on {page.url})")
             return valid
         finally:
-            await browser.close()
+            await context.close()

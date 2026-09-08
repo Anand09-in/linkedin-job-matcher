@@ -2,7 +2,6 @@ import { CheckCircle2, HelpCircle, XCircle } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { apiErrorMessage } from '@/api/client'
 import {
-  useCheckScraperCredential,
   useLLMSetting,
   useScraperCredential,
   useUpdateLLMSetting,
@@ -99,7 +98,6 @@ export function SettingsPage() {
 function LinkedInSessionCard() {
   const { data: credential, isLoading } = useScraperCredential('linkedin')
   const updateCredential = useUpdateScraperCredential('linkedin')
-  const checkCredential = useCheckScraperCredential('linkedin')
   const push = useToastStore((s) => s.push)
   const [cookie, setCookie] = useState('')
 
@@ -116,14 +114,18 @@ function LinkedInSessionCard() {
         </p>
 
         {!isLoading && credential && (
-          <div className="flex items-center gap-2 text-sm">
-            <span className="text-muted-foreground">Status:</span>
-            {!credential.configured ? (
-              <span className="text-muted-foreground">Not configured</span>
-            ) : (
+          !credential.configured ? (
+            <p className="text-sm text-muted-foreground">No cookie configured yet.</p>
+          ) : (
+            <div className="grid grid-cols-3 gap-x-4 gap-y-1 rounded-md border border-border bg-muted/30 p-3 text-sm">
+              <span className="text-xs font-semibold uppercase text-muted-foreground">Cookie</span>
+              <span className="text-xs font-semibold uppercase text-muted-foreground">Saved</span>
+              <span className="text-xs font-semibold uppercase text-muted-foreground">Status</span>
+              <span className="font-mono">{credential.masked_value}</span>
+              <span>{timeAgo(credential.updated_at)}</span>
               <CheckStatus status={credential.last_check_status} checkedAt={credential.last_checked_at} />
-            )}
-          </div>
+            </div>
+          )
         )}
 
         <form
@@ -134,7 +136,7 @@ function LinkedInSessionCard() {
             try {
               await updateCredential.mutateAsync(cookie)
               setCookie('')
-              push('LinkedIn cookie saved — takes effect on the next scrape run')
+              push('LinkedIn cookie saved — checking it against LinkedIn now, status updates below in a few seconds')
             } catch (err) {
               push(apiErrorMessage(err), 'error')
             }
@@ -155,23 +157,6 @@ function LinkedInSessionCard() {
             </Button>
           </div>
         </form>
-
-        <Button
-          variant="outline"
-          size="sm"
-          className="w-fit"
-          disabled={!credential?.configured || checkCredential.isPending}
-          onClick={async () => {
-            try {
-              await checkCredential.mutateAsync()
-              push('Checking cookie against LinkedIn — status updates below in a few seconds')
-            } catch (err) {
-              push(apiErrorMessage(err), 'error')
-            }
-          }}
-        >
-          {checkCredential.isPending ? <Spinner /> : null} Test cookie
-        </Button>
       </CardContent>
     </Card>
   )

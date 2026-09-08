@@ -271,21 +271,30 @@ class LinkedInScraper:
         all) BEFORE starting a run, as a setup-prerequisite check in the
         same tier as an adapter-connect failure or a resume-parse failure.
 
-        Added directly in response to a real, confusing failure mode: an
-        expired li_at cookie doesn't error or redirect obviously — LinkedIn
-        silently serves the logged-out public search page instead (no
-        `.scaffold-layout__list`), so without this check a run just quietly
-        completes with seen=0/saved=0, indistinguishable from "this query
-        genuinely has no matches" until someone thinks to check the cookie
-        itself (see cookie_check.py's docstring for the full diagnosis).
+        Deliberately a LOCAL, DB-only lookup — NOT a live Playwright hit
+        against LinkedIn. It was one at first, but that doubled every run's
+        footprint on LinkedIn (one hit for the precheck, one for the actual
+        scrape), which turned out to be a real, live problem: LinkedIn's own
+        session-security systems read "the same session cookie, launching a
+        brand-new browser fingerprint, repeatedly, in a short window" as
+        suspicious multi-device access and force-invalidate the session —
+        independent of the cookie's real 30-day expiry. Doubling that
+        footprint on every single run made actual logouts measurably more
+        frequent. This now only catches a cookie ALREADY KNOWN bad from the
+        last explicit check (Settings page, on save) — no unmeasured cost,
+        still stops a run that's certain to fail before wasting one.
         """
-        from app.scrapers.linkedin.cookie_check import check_cookie_valid
+        from app.domain.db import AsyncSessionLocal
+        from app.domain.repository import Repository
 
         cookie = await _resolve_li_at_cookie()
         if not cookie:
             return False, "No LinkedIn session cookie configured — set one via Settings in the UI (or LI_AT_COOKIE in .env)."
-        if not await check_cookie_valid(cookie):
-            return False, "LinkedIn session cookie is invalid or expired — update it via Settings in the UI."
+
+        async with AsyncSessionLocal() as session:
+            credential = await Repository(session).get_scraper_credential("linkedin")
+        if credential and credential.last_check_status == "invalid":
+            return False, "LinkedIn session cookie was last checked as invalid or expired — update it via Settings in the UI."
         return True, ""
 
     async def scrape(self, config: ScrapeConfig) -> AsyncIterator[list[RawJob]]:
@@ -295,22 +304,21 @@ class LinkedInScraper:
                 "No LinkedIn session cookie configured — set one via Settings in the UI (or LI_AT_COOKIE in .env)."
             )
 
+        from app.scrapers.linkedin.browser import launch_linkedin_context
+
         async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=True)
+            # A persistent, volume-backed profile (browser.py's docstring) —
+            # not a fresh incognito-style context per run — so repeated runs
+            # look like one consistent device to LinkedIn instead of a new
+            # one each time.
+            context = await launch_linkedin_context(pw, cookie)
             try:
-                context = await browser.new_context()
-                await context.add_cookies([{
-                    "name": "li_at",
-                    "value": cookie,
-                    "domain": ".www.linkedin.com",
-                    "path": "/",
-                }])
                 page = await context.new_page()
 
                 async for batch in batched(self._iter_jobs(page, config), config.batch_size):
                     yield batch
             finally:
-                await browser.close()
+                await context.close()
 
     async def _iter_jobs(self, page: Page, config: ScrapeConfig) -> AsyncIterator[RawJob]:
         await page.goto(_HOME_URL)

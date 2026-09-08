@@ -348,8 +348,9 @@ export interface paths {
         };
         /**
          * Get Scraper Credential
-         * @description Never returns the actual cookie value — `configured` + the last
-         *     check's result/timestamp is all the UI needs to show.
+         * @description Never returns the full cookie value — `masked_value` (last 4 chars)
+         *     plus the last check's result/timestamp is enough for the UI to show
+         *     what's stored without exposing the working credential.
          */
         get: operations["get_scraper_credential_settings_scraper_credentials__site__get"];
         /**
@@ -357,32 +358,17 @@ export interface paths {
          * @description Takes effect on the very next scrape run for this site — no worker
          *     restart (the previous LI_AT_COOKIE-env-only setup needed one to rotate
          *     an expired cookie).
+         *
+         *     Also auto-enqueues a validity check (check_scraper_credential_task) right
+         *     away — per explicit user feedback, saving a cookie and finding out
+         *     whether it actually works shouldn't be two separate steps. The response
+         *     still comes back with last_check_status=null (the check runs on the
+         *     worker, in the background); the frontend's poll on GET picks up the
+         *     result a few seconds later, same as it already did for the standalone
+         *     "Test cookie" action this replaces.
          */
         put: operations["update_scraper_credential_settings_scraper_credentials__site__put"];
         post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/settings/scraper-credentials/{site}/check": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Check Scraper Credential
-         * @description "Test cookie" action — enqueues check_scraper_credential_task on the
-         *     worker (only that image has Playwright to actually ask LinkedIn) and
-         *     returns immediately; poll GET /settings/scraper-credentials/{site} for
-         *     last_check_status, same shape as polling a scrape run.
-         */
-        post: operations["check_scraper_credential_settings_scraper_credentials__site__check_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -939,24 +925,20 @@ export interface components {
              */
             pipeline_id: string;
         };
-        /** ScraperCredentialCheckResponse */
-        ScraperCredentialCheckResponse: {
-            /** Enqueued */
-            enqueued: boolean;
-            /** Job Id */
-            job_id: string;
-            /** Site */
-            site: string;
-        };
         /** ScraperCredentialResponse */
         ScraperCredentialResponse: {
             /** Site */
             site: string;
             /**
              * Configured
-             * @description Whether a value has been set — the value itself is never echoed back.
+             * @description Whether a value has been set — the full value itself is never echoed back.
              */
             configured: boolean;
+            /**
+             * Masked Value
+             * @description Last 4 characters only (e.g. '••••••wxyz') — enough to recognize which cookie is stored without exposing it.
+             */
+            masked_value?: string | null;
             /**
              * Last Check Status
              * @description 'valid' | 'invalid' | 'error' | null if never checked.
@@ -1830,37 +1812,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ScraperCredentialResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    check_scraper_credential_settings_scraper_credentials__site__check_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                site: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            202: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ScraperCredentialCheckResponse"];
                 };
             };
             /** @description Validation Error */

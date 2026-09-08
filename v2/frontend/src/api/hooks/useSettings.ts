@@ -35,10 +35,11 @@ export function useScraperCredential(site: string) {
       if (error) throw error
       return data
     },
-    // Polls briefly after a "Test cookie" check is triggered (worker-side,
-    // Playwright) — same fire-and-forget-then-poll shape as a scrape run.
-    // Cheap enough to just always poll while this query is mounted rather
-    // than switching it on/off around the check mutation.
+    // Polls briefly after a save (PUT auto-enqueues a validity check on the
+    // worker, Playwright-side — no separate "Test cookie" action needed)
+    // so the Status cell updates on its own a few seconds later. Cheap
+    // enough to just always poll while this query is mounted rather than
+    // switching it on/off around the save mutation.
     refetchInterval: 3000,
   })
 }
@@ -53,20 +54,6 @@ export function useUpdateScraperCredential(site: string) {
     },
     onSuccess: (data) => {
       qc.setQueryData(['settings', 'scraper-credentials', site], data)
-    },
-  })
-}
-
-export function useCheckScraperCredential(site: string) {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: async () => {
-      const { data, error } = await api.POST('/settings/scraper-credentials/{site}/check', { params: { path: { site } } })
-      if (error) throw error
-      return data
-    },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['settings', 'scraper-credentials', site] })
     },
   })
 }
