@@ -59,6 +59,55 @@ async def test_resume_upload_list_detail_update_delete(api_client):
     assert (await api_client.get(f"/resumes/{resume_id}")).status_code == 404
 
 
+async def test_resume_upload_eagerly_parses_and_caches_profile(api_client):
+    """Per explicit user request: parsing happens right after upload, not
+    lazily on first pipeline run (scrape_service.py's _resolve_resume_profile
+    still has that lazy path too, as a fallback — this only tests the eager
+    one via the real route)."""
+    from unittest.mock import AsyncMock, patch
+
+    from app.llm_tasks.schemas import ResumeProfile
+
+    pdf_bytes = _make_pdf_bytes("Jane Doe, Senior Data Engineer, 6 years experience.")
+    fake_profile = ResumeProfile(summary="Senior data engineer.", skills=["SQL", "Spark"], current_title="Senior Data Engineer", total_experience_years=6.0)
+
+    with patch("app.llm_tasks.resume_parser.parse_resume", AsyncMock(return_value=fake_profile)) as mock_parse:
+        create_resp = await api_client.post(
+            "/resumes", data={"name": "Jane"}, files={"file": ("resume.pdf", pdf_bytes, "application/pdf")}
+        )
+    assert create_resp.status_code == 201
+    created = create_resp.json()
+    assert mock_parse.await_count == 1
+    assert created["parsed_profile"]["current_title"] == "Senior Data Engineer"
+    assert created["parsed_profile"]["skills"] == ["SQL", "Spark"]
+
+    # Replacing the file re-parses immediately too, not just clears the cache.
+    new_pdf = _make_pdf_bytes("Jane Doe, Staff Data Engineer, 8 years experience.")
+    updated_profile = ResumeProfile(summary="Staff data engineer.", skills=["SQL", "Airflow"], current_title="Staff Data Engineer", total_experience_years=8.0)
+    with patch("app.llm_tasks.resume_parser.parse_resume", AsyncMock(return_value=updated_profile)) as mock_reparse:
+        update_resp = await api_client.put(
+            f"/resumes/{created['id']}", files={"file": ("resume2.pdf", new_pdf, "application/pdf")}
+        )
+    assert update_resp.status_code == 200
+    assert mock_reparse.await_count == 1
+    assert update_resp.json()["parsed_profile"]["current_title"] == "Staff Data Engineer"
+
+
+async def test_resume_upload_succeeds_even_if_eager_parse_fails(api_client):
+    """Best-effort: a parse failure at upload time (e.g. a transient Bedrock
+    error) must not fail the upload itself — the resume is still useful with
+    just its raw text, and falls through to the lazy parse-on-first-run path."""
+    from unittest.mock import AsyncMock, patch
+
+    pdf_bytes = _make_pdf_bytes("Some resume text.")
+    with patch("app.llm_tasks.resume_parser.parse_resume", AsyncMock(side_effect=RuntimeError("simulated Bedrock failure"))):
+        resp = await api_client.post(
+            "/resumes", data={"name": "R"}, files={"file": ("r.pdf", pdf_bytes, "application/pdf")}
+        )
+    assert resp.status_code == 201
+    assert resp.json()["parsed_profile"] is None
+
+
 async def test_resume_upload_rejects_non_pdf(api_client):
     resp = await api_client.post(
         "/resumes", data={"name": "Bad"}, files={"file": ("resume.txt", b"not a pdf", "text/plain")}
@@ -203,6 +252,29 @@ async def test_settings_llm_get_and_put(api_client):
     get_resp = await api_client.get("/settings/llm")
     assert get_resp.status_code == 200
     assert get_resp.json()["model"] == "anthropic.claude-3-haiku-20240307-v1:0"
+
+
+async def test_scraper_credential_lifecycle(api_client):
+    get_before = await api_client.get("/settings/scraper-credentials/linkedin")
+    assert get_before.status_code == 200
+    assert get_before.json() == {
+        "site": "linkedin", "configured": False, "last_check_status": None, "last_checked_at": None, "updated_at": None,
+    }
+
+    put_resp = await api_client.put("/settings/scraper-credentials/linkedin", json={"value": "fake-li-at-cookie"})
+    assert put_resp.status_code == 200
+    body = put_resp.json()
+    assert body["configured"] is True
+    assert "value" not in body  # never echoed back — it's a session credential, not display data
+
+    check_resp = await api_client.post("/settings/scraper-credentials/linkedin/check")
+    assert check_resp.status_code == 202
+    assert check_resp.json()["enqueued"] is True
+
+
+async def test_scraper_credential_check_without_one_configured_404s(api_client):
+    resp = await api_client.post("/settings/scraper-credentials/linkedin/check")
+    assert resp.status_code == 404
 
 
 # ── Features (service logic is covered thoroughly in test_feature_service.py —

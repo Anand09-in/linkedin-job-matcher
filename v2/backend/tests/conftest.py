@@ -97,7 +97,7 @@ async def db_session():
         await conn.execute(
             text(
                 "TRUNCATE TABLE jobs, rejected_jobs, scrape_runs, pipelines, "
-                "resumes, llm_settings, feature_results RESTART IDENTITY CASCADE"
+                "resumes, llm_settings, feature_results, scraper_credentials RESTART IDENTITY CASCADE"
             )
         )
     await engine.dispose()
@@ -151,13 +151,26 @@ async def api_client(db_session):
     """An httpx.AsyncClient wired directly to the FastAPI app via ASGI
     transport (no real network, no lifespan — app.state.redis is set
     manually to the fake above instead of lifespan's real create_pool)."""
-    from unittest.mock import patch
+    from unittest.mock import AsyncMock, patch
 
     import httpx
 
+    from app.llm_tasks.schemas import ResumeProfile
     from app.main import app
 
     app.state.redis = _FakeArqRedis()
+
+    # A default fake for POST/PUT /resumes' eager parse-at-upload-time call
+    # (app/api/routes/resumes.py's _parse_and_cache) — without this, any
+    # test that uploads a resume would trigger a REAL Bedrock call via
+    # parse_resume(). Patched at its source module (app.llm_tasks.
+    # resume_parser), not app.api.routes.resumes, since _parse_and_cache
+    # does `from app.llm_tasks.resume_parser import parse_resume` freshly
+    # INSIDE the function on every call — same lazy-import-respects-
+    # source-patch pattern as the AsyncSessionLocal patches below. A test
+    # that cares about the actual parsed content re-patches this itself
+    # with a more specific fake; unittest.mock.patch nests correctly.
+    fake_profile = ResumeProfile(summary="Test summary", skills=["Python"], current_title="Engineer", total_experience_years=2.0)
 
     # Two separate patches, not one: app.api.dependencies imports
     # AsyncSessionLocal at ITS OWN module top level (bound once, at import
@@ -169,7 +182,8 @@ async def api_client(db_session):
     # get_llm() (features.py) need the second patch too, or they'd silently
     # read/write the real dev database's LLMSetting row during a test.
     with patch("app.api.dependencies.AsyncSessionLocal", return_value=_SessionCtx(db_session)), \
-         patch("app.domain.db.AsyncSessionLocal", return_value=_SessionCtx(db_session)):
+         patch("app.domain.db.AsyncSessionLocal", return_value=_SessionCtx(db_session)), \
+         patch("app.llm_tasks.resume_parser.parse_resume", AsyncMock(return_value=fake_profile)):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             yield client

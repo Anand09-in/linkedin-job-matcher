@@ -1,39 +1,28 @@
-import { useEffect, useState } from 'react'
-import './App.css'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { RouterProvider } from 'react-router'
+import { Toaster } from '@/components/Toaster'
+import { router } from '@/router'
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      // No retries by default: this is a local single-user tool talking to
+      // one backend on the same machine, not a flaky public API — a failed
+      // request is almost always a real 4xx/5xx (caught live: a query with
+      // a bad param retried once before finally showing its error, making
+      // a real bug look like a slow load instead of an immediate failure).
+      retry: false,
+      staleTime: 10_000,
+    },
+  },
+})
 
-type HealthResponse = {
-  status: string
-  db: string
-  redis: string
-  version: string
-}
-
-// Phase 0 placeholder: proves frontend -> api connectivity across the Docker
-// network before any real pages exist. Phase 8 replaces this file entirely
-// with the real app (routing, Job Results, Pipelines manager, etc. per
-// plan.md Phase 8 / functional-requirements.md FR-8).
 function App() {
-  const [health, setHealth] = useState<HealthResponse | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    fetch(`${API_BASE_URL}/health`)
-      .then((res) => res.json())
-      .then(setHealth)
-      .catch((err) => setError(String(err)))
-  }, [])
-
   return (
-    <main style={{ fontFamily: 'sans-serif', padding: '2rem' }}>
-      <h1>LinkedIn Job Matcher — v2</h1>
-      <p>Phase 0 placeholder. Real UI lands in Phase 8.</p>
-      <h2>Backend health check ({API_BASE_URL}/health)</h2>
-      {error && <p style={{ color: 'crimson' }}>Error: {error}</p>}
-      {health && <pre>{JSON.stringify(health, null, 2)}</pre>}
-      {!health && !error && <p>Loading…</p>}
-    </main>
+    <QueryClientProvider client={queryClient}>
+      <RouterProvider router={router} />
+      <Toaster />
+    </QueryClientProvider>
   )
 }
 

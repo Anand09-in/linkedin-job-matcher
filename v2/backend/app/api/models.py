@@ -178,12 +178,17 @@ class ScrapeTriggerResponse(BaseModel):
     pipeline_id: uuid.UUID
 
 
+class DeletedCountResponse(BaseModel):
+    deleted_count: int
+
+
 class ScrapeRunResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
     pipeline_id: uuid.UUID
     status: str
+    cancel_requested: bool
     config_snapshot: dict[str, Any]
     jobs_seen: int
     jobs_saved: int
@@ -207,6 +212,26 @@ class LLMSettingUpdateRequest(BaseModel):
     model: str
     temperature: float = 0.1
     max_tokens: int = 2000
+
+
+# ── Scraper credentials (Phase 8 — UI-editable, e.g. LinkedIn's li_at cookie) ─
+
+class ScraperCredentialResponse(BaseModel):
+    site: str
+    configured: bool = Field(..., description="Whether a value has been set — the value itself is never echoed back.")
+    last_check_status: Optional[str] = Field(None, description="'valid' | 'invalid' | 'error' | null if never checked.")
+    last_checked_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class ScraperCredentialUpdateRequest(BaseModel):
+    value: str = Field(..., min_length=1)
+
+
+class ScraperCredentialCheckResponse(BaseModel):
+    enqueued: bool
+    job_id: str
+    site: str
 
 
 # ── On-demand features (FR-6 — moved here unchanged from Phase 6's main.py) ──

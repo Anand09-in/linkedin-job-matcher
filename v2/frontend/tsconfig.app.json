@@ -16,6 +16,13 @@
     "noEmit": true,
     "jsx": "react-jsx",
 
+    /* Path alias — matches vite.config.ts's resolve.alias. No baseUrl needed:
+       TS resolves `paths` relative to this file's own directory since 4.1+
+       (and `baseUrl` is deprecated under "bundler" moduleResolution). */
+    "paths": {
+      "@/*": ["./src/*"]
+    },
+
     /* Linting */
     "noUnusedLocals": true,
     "noUnusedParameters": true,

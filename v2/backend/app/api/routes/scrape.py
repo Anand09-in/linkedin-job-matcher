@@ -50,3 +50,21 @@ async def get_scrape_run(run_id: uuid.UUID, repo: Repository = Depends(get_repo)
     if run is None:
         raise HTTPException(status_code=404, detail=f"Scrape run {run_id} not found")
     return ScrapeRunResponse.model_validate(run)
+
+
+@router.post("/{run_id}/cancel", response_model=ScrapeRunResponse)
+async def cancel_scrape_run(run_id: uuid.UUID, repo: Repository = Depends(get_repo)):
+    """
+    Best-effort, cooperative stop (Pipelines page "Stop" action) — raises
+    `cancel_requested`, which the running scrape loop notices between
+    batches (scrape_service.py), not instantly. 409 if the run isn't
+    currently `running` (already finished — nothing to cancel).
+    """
+    existing = await repo.get_scrape_run(run_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f"Scrape run {run_id} not found")
+    if existing.status != "running":
+        raise HTTPException(status_code=409, detail=f"Scrape run {run_id} is '{existing.status}', not running — nothing to cancel")
+
+    updated = await repo.request_scrape_run_cancellation(run_id)
+    return ScrapeRunResponse.model_validate(updated)

@@ -73,6 +73,14 @@ async def _resolve_resume_profile(
     model to use it that call — that part can't be avoided. What this avoids
     is resending the FULL raw resume text every time; a ~150-300 token
     profile, computed once, gets reused instead.
+
+    As of Phase 8, `app/api/routes/resumes.py` already parses eagerly right
+    after upload/replace, so in practice `resume.parsed_profile` is almost
+    always already set by the time any run gets here. This lazy path stays
+    as the fallback for the cases that eager path doesn't cover: a resume
+    uploaded before this changed, or one whose eager parse failed (a
+    best-effort call — a transient Bedrock hiccup at upload time doesn't
+    fail the upload itself, see `_parse_and_cache`'s docstring there).
     """
     if resume is None:
         return None
@@ -193,6 +201,18 @@ async def run_scrape_pipeline(
         jobs_rejected += 1
 
     try:
+        # Credential precheck — optional per-adapter hook (testsite has none;
+        # LinkedInScraper.check_credential's docstring has the full story on
+        # why this exists: an expired li_at cookie doesn't error, it just
+        # makes every job in the run look like a genuine zero-match query).
+        # Same failure tier as the resume-profile resolution below: a
+        # run-setup prerequisite, checked BEFORE spending any batches/LLM
+        # calls on a run that's certain to find nothing.
+        if hasattr(scraper, "check_credential"):
+            ok, message = await scraper.check_credential()
+            if not ok:
+                raise ValueError(message)
+
         # Parsed/cached ONCE per resume (not per run, not per batch) — see
         # _resolve_resume_profile's docstring. A failure here is treated the
         # same as an adapter-level failure (caught by this same try/except):
@@ -201,6 +221,24 @@ async def run_scrape_pipeline(
         has_resume = resume_profile is not None
 
         async for batch in scraper.scrape(config):
+            # Cooperative cancellation (Pipelines page "Stop" action) — the
+            # only granularity that makes sense here, since a batch already
+            # in flight (its LLM call) can't be interrupted mid-call anyway.
+            # Re-fetches rather than trusting a stale in-memory flag, since
+            # the cancel request comes from a separate HTTP request.
+            current = await repo.get_scrape_run(run.id)
+            if current is not None and current.cancel_requested:
+                logger.info(f"[scrape_service] run={run.id} cancelled by request")
+                await repo.update_scrape_run(
+                    run.id, jobs_seen=jobs_seen, jobs_saved=jobs_saved, jobs_rejected=jobs_rejected, errors=errors
+                )
+                await repo.finish_scrape_run(run.id, status="cancelled")
+                return {
+                    "run_id": run.id, "status": "cancelled",
+                    "jobs_seen": jobs_seen, "jobs_saved": jobs_saved, "jobs_rejected": jobs_rejected,
+                    "errors": errors,
+                }
+
             jobs_seen += len(batch)
 
             try:

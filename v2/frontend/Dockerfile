@@ -5,7 +5,10 @@ FROM node:22-slim
 
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm install
+# --legacy-peer-deps: openapi-typescript's peerDependencies still declare
+# typescript "^5.x" (stale — hasn't caught up to TS 6 yet), which isn't an
+# actual incompatibility for a build-time-only CLI tool like this.
+RUN npm install --legacy-peer-deps
 
 COPY . .
 

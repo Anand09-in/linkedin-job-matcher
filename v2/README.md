@@ -5,7 +5,16 @@ plan, and the other docs it links to ([functional-requirements.md](docs/function
 [architecture.md](docs/architecture.md), [system-design.md](docs/system-design.md),
 [flow-diagrams.md](docs/flow-diagrams.md)) for the full design.
 
-**Status:** Phase 7 (API surface completion) complete — the real, documented
+**Status:** Phase 8 (Frontend rebuild) complete — a real React + TypeScript
+app (Vite, Tailwind v4, TanStack Query, Zustand, React Router v7) at
+http://localhost:5173, replacing v1's Streamlit UI, talking to Phase 7's API
+through a client generated from its own `openapi.json`. All 6 pages (Job
+Results, Job Detail, Resumes, Pipelines, Tracker, Settings) verified working
+end-to-end against the real backend via a headless-browser walkthrough,
+which caught a real bug that `tsc`/`vite build` never would have: the API
+had no CORS middleware, so every browser request would have been blocked.
+See the Phase 8 section below for details. Phase 7 (API surface completion)
+complete — the real, documented
 REST API the frontend (Phase 8) will build against: `app/api/routes/`
 (`jobs`, `scrape`, `resumes`, `pipelines`, `settings`, `features`, `export`),
 `app/api/models.py` (a proper Pydantic response model for every endpoint —
@@ -320,6 +329,16 @@ a silent fallback to unfiltered mode. Locked in with `test_resume_profile_is_par
   test one. Fixed by patching both `app.api.dependencies.AsyncSessionLocal`
   and `app.domain.db.AsyncSessionLocal` in the `api_client` test fixture.
 
+**Phase 8 — frontend rebuild (stack, structure, and what was validated):**
+
+- `v2/frontend/src/`: `api/` (generated `schema.d.ts` + `openapi-fetch` client + one hook file per resource in `hooks/`), `components/ui/` (hand-rolled Button/Input/Select/Card/Table/Dialog/Tabs/Badge — cva + `cn()`, the same pattern shadcn's CLI generates, written directly instead of pulled from a live registry), `components/layout/AppShell.tsx` (sidebar nav), `store/` (Zustand — `uiStore` for the cross-page pipeline filter, `toastStore` for notifications), `pages/` (one per route), `router.tsx`.
+- **Dev inner loop got a real infrastructure fix mid-phase**: `docker-compose.yml`'s `frontend` service had no source bind mount — every one-line edit needed a full image rebuild to test, which was not viable at the edit rate frontend work needs. Added `./frontend:/app` + an anonymous `/app/node_modules` volume (so the host's *empty* node_modules doesn't shadow what `npm install` already put in the image) — Vite's HMR now picks up edits instantly, matching how `api`/`worker` still work today (source baked in, rebuild required) versus how `frontend` works now (live-mounted).
+- **A real, load-bearing bug found only by actually running this in a browser**: the backend had no CORS middleware at all. `localhost:5173` (frontend) and `localhost:8000` (api) are different origins by port alone — the browser blocks the request regardless of both being "localhost." This would have broken every single page for every real user, and neither the backend's own test suite nor `tsc`/`vite build` could ever have caught it, since CORS is enforced by the browser, not the server under test. Fixed with `CORSMiddleware` in `main.py`, allowed origins configurable via `CORS_ALLOWED_ORIGINS` (`.env.example`).
+- **A second real bug from the same verification pass**: the Tracker page requested `GET /jobs?limit=500`, but the endpoint caps `limit` at 200 (`le=200`) — a silent 422 that left the page stuck on its loading spinner (made worse by React Query's default `retry: 1`, which retried the doomed request once before finally surfacing the error). Fixed the request (`limit: 200`) and turned off default query retries app-wide — this is a local single-user tool talking to one backend on the same machine, not a flaky public API, so a failed request is almost always a real error worth surfacing immediately, not retrying.
+- **How it was verified, concretely**: since this environment has no browser reachable from the host, verification ran Playwright *inside the `worker` container* (which already has Chromium installed for LinkedIn scraping — reused rather than adding a browser to the frontend image) driving the real dev server at `http://frontend:5173` over the Compose network. Two mechanics specific to that setup, not the app itself: Vite's dev server rejects requests with an unrecognized `Host` header by default (DNS-rebinding protection) — fixed by adding `frontend` to `server.allowedHosts` in `vite.config.ts`; and `VITE_API_BASE_URL=http://localhost:8000` (correct for a real user's host browser) doesn't resolve from inside a *different* container, so the verification script's own Playwright context rewrites `localhost:8000` → `api:8000` for itself only, via `context.route()` — the app's real config is untouched.
+- **Verified end-to-end against the real backend, zero console errors on the final run**: Job Results listing real scraped jobs with working filters; Job Detail showing real match/salary data and running `company_research` as an on-demand feature (correctly showing "Served from cache" against a result generated back in Phase 6 testing — proving the cache key survives across phases); Pipelines listing real pipelines and opening the create dialog; Resumes listing real uploaded resumes; Tracker's status funnel; Settings reading/writing the real active LLM setting.
+- Production build: `Dockerfile.prod` (multi-stage — `npm run build` then Nginx) + `nginx.conf` (SPA fallback: `try_files ... /index.html`, so a hard refresh on e.g. `/jobs/<id>` doesn't 404). Verified by building the image standalone and confirming both `/` and a deep client-side route return 200.
+
 **Lessons from live testing** (things a fixture can't catch, since they
 involve LinkedIn's real async client-side rendering):
 - LinkedIn lazily hydrates job-card content as it scrolls into view — reading
@@ -367,13 +386,35 @@ curl http://localhost:8000/health
 # {"status":"ok","db":"ok","redis":"ok","version":"0.0.1"}
 ```
 
-Then open http://localhost:5173 — the placeholder page calls `/health`
-itself — or http://localhost:8000/docs for the full interactive API surface
-(Phase 7's `openapi.json`, auto-generated from `app/api/routes/`).
+Then open http://localhost:5173 for the real app (Phase 8 — Job Results,
+Pipelines, Resumes, Tracker, Settings) — or http://localhost:8000/docs for
+the full interactive API surface (Phase 7's `openapi.json`, auto-generated
+from `app/api/routes/`).
 
 If a port is already taken on your machine (a real problem hit during v1
 development — an unrelated project's Docker container was found squatting on
 port 8000), change `API_PORT`/`FRONTEND_PORT` in `.env` (FR-9.3).
+
+## Frontend development (Phase 8)
+
+`frontend` now bind-mounts `./frontend` into the container (Vite HMR picks
+up edits instantly — no rebuild needed for source changes, only for
+`package.json` dependency changes):
+
+```bash
+docker compose exec frontend npm install          # after changing package.json
+docker compose exec frontend npm run generate-api  # regenerate src/api/schema.d.ts after a backend API change
+docker compose exec frontend npm run build         # type-check (tsc -b) + production build, catches errors across the whole app
+```
+
+Production image (Nginx-served static build, FR-9.2 — not part of the dev
+`docker compose up` stack):
+
+```bash
+docker build -f frontend/Dockerfile.prod -t jobmatcher-frontend-prod \
+  --build-arg VITE_API_BASE_URL=https://your-real-api-origin frontend/
+docker run -p 8080:80 jobmatcher-frontend-prod
+```
 
 ## Running the backend test suite (Phase 1+)
 

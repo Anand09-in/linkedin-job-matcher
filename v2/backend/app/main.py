@@ -20,6 +20,7 @@ from contextlib import asynccontextmanager
 from arq import create_pool
 from arq.connections import RedisSettings
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 from pydantic import BaseModel
 
@@ -48,6 +49,20 @@ app = FastAPI(
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
+)
+
+# Phase 8: the frontend (localhost:5173) and this API (localhost:8000) are
+# different origins by port alone, even on the same machine — without this,
+# the browser blocks every request the frontend makes with a CORS error,
+# caught live while verifying the frontend in a real browser (not something
+# `tsc`/`vite build` or the backend's own test suite could ever catch, since
+# CORS is enforced by the browser, not the server under test).
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_allowed_origins_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(jobs.router)

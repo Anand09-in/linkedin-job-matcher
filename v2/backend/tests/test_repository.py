@@ -8,6 +8,7 @@ Phase 1 exit-criteria tests (plan.md):
 """
 from __future__ import annotations
 
+import uuid
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -306,6 +307,37 @@ async def test_scrape_run_lifecycle(repo):
     assert len(runs) == 1
 
 
+async def test_delete_scrape_runs_skips_running_ones(repo):
+    resume = await _make_resume(repo)
+    pipeline = await _make_pipeline(repo, resume)
+
+    done_run = await repo.create_scrape_run(pipeline.id, config_snapshot={})
+    await repo.finish_scrape_run(done_run.id, status="completed")
+    running_run = await repo.create_scrape_run(pipeline.id, config_snapshot={})  # left running
+
+    deleted = await repo.delete_scrape_runs(pipeline.id)
+
+    assert deleted == 1
+    remaining = await repo.list_scrape_runs(pipeline_id=pipeline.id)
+    assert [r.id for r in remaining] == [running_run.id]
+
+
+async def test_request_scrape_run_cancellation_only_while_running(repo):
+    resume = await _make_resume(repo)
+    pipeline = await _make_pipeline(repo, resume)
+    run = await repo.create_scrape_run(pipeline.id, config_snapshot={})
+
+    updated = await repo.request_scrape_run_cancellation(run.id)
+    assert updated.cancel_requested is True
+
+    await repo.finish_scrape_run(run.id, status="completed")
+    # Already finished — nothing left to cancel, so this is a no-op (None),
+    # not an error and not a resurrection of a finished run.
+    assert await repo.request_scrape_run_cancellation(run.id) is None
+
+    assert await repo.request_scrape_run_cancellation(uuid.uuid4()) is None
+
+
 # ── LLMSetting (FR-3.1 — single active row, global) ─────────────────────────
 
 
@@ -322,3 +354,30 @@ async def test_llm_setting_single_active_row(repo):
     active = await repo.get_active_llm_setting()
     assert active.provider == "bedrock"
     assert active.model == "mistral.mistral-large-2407-v1:0"
+
+
+# ── ScraperCredential (Phase 8 — UI-editable, e.g. LinkedIn's li_at cookie) ──
+
+
+async def test_scraper_credential_upsert_and_check_result(repo):
+    assert await repo.get_scraper_credential("linkedin") is None
+
+    first = await repo.set_scraper_credential("linkedin", "cookie-v1")
+    assert first.value == "cookie-v1"
+    assert first.last_check_status is None
+
+    checked = await repo.record_scraper_credential_check("linkedin", "valid")
+    assert checked.last_check_status == "valid"
+    assert checked.last_checked_at is not None
+
+    # Replacing the value resets any prior check result — a freshly-pasted
+    # cookie hasn't been tested yet, so the old "valid" must not linger.
+    updated = await repo.set_scraper_credential("linkedin", "cookie-v2")
+    assert updated.id == first.id  # same row, upserted in place
+    assert updated.value == "cookie-v2"
+    assert updated.last_check_status is None
+    assert updated.last_checked_at is None
+
+
+async def test_record_check_result_for_missing_credential_is_a_noop(repo):
+    assert await repo.record_scraper_credential_check("linkedin", "valid") is None

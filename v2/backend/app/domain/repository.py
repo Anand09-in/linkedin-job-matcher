@@ -23,7 +23,7 @@ from sqlalchemy import and_, delete, func, nullslast, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import ResumeInUseError
-from app.domain.models import FeatureResult, Job, LLMSetting, Pipeline, RejectedJob, Resume, ScrapeRun
+from app.domain.models import FeatureResult, Job, LLMSetting, Pipeline, RejectedJob, Resume, ScraperCredential, ScrapeRun
 
 
 class Repository:
@@ -163,6 +163,23 @@ class Repository:
         result = await self._s.execute(q)
         return list(result.scalars().all())
 
+    async def delete_scrape_runs(self, pipeline_id: uuid.UUID) -> int:
+        """Clears run history for a pipeline (Pipelines page "clear history"
+        action). Never deletes a `running` row — even though the UI already
+        disables this while a run is active, guarding here too means a
+        stray/racing request can't pull the rug out from under
+        scrape_service.py's own `update_scrape_run`/`finish_scrape_run`
+        calls on a run it's still actively writing to. RejectedJob rows for
+        the deleted runs cascade-delete with them (ondelete="CASCADE");
+        Job.scrape_run_id on any jobs those runs produced is set to NULL
+        (ondelete="SET NULL") — the jobs themselves are untouched, they just
+        lose their "which run produced this" attribution."""
+        result = await self._s.execute(
+            delete(ScrapeRun).where(ScrapeRun.pipeline_id == pipeline_id, ScrapeRun.status != "running")
+        )
+        await self._s.commit()
+        return result.rowcount or 0
+
     async def update_scrape_run(self, run_id: uuid.UUID, **fields: Any) -> Optional[ScrapeRun]:
         """Generic partial update — Phase 3 uses this for jobs_seen/saved/rejected counters."""
         if fields:
@@ -177,6 +194,20 @@ class Repository:
             .values(status=status, finished_at=datetime.now(timezone.utc))
         )
         await self._s.commit()
+
+    async def request_scrape_run_cancellation(self, run_id: uuid.UUID) -> Optional[ScrapeRun]:
+        """Only takes effect while the run is still `running` — a run that
+        already finished (completed/failed/cancelled) has nothing left to
+        stop. Returns None if the run doesn't exist or isn't running (the
+        route treats either as "nothing to cancel"), otherwise the updated
+        row. The scrape loop itself (scrape_service.py) is what actually
+        notices this flag and stops — this just raises it."""
+        run = await self.get_scrape_run(run_id)
+        if run is None or run.status != "running":
+            return None
+        await self._s.execute(update(ScrapeRun).where(ScrapeRun.id == run_id).values(cancel_requested=True))
+        await self._s.commit()
+        return await self.get_scrape_run(run_id)
 
     # ── Job ───────────────────────────────────────────────────────────────────
 
@@ -463,3 +494,45 @@ class Repository:
         await self._s.commit()
         await self._s.refresh(row)
         return row
+
+    # ── ScraperCredential — per-site session credential, UI-editable (Phase 8) ──
+
+    async def get_scraper_credential(self, site: str) -> Optional[ScraperCredential]:
+        result = await self._s.execute(select(ScraperCredential).where(ScraperCredential.site == site))
+        return result.scalar_one_or_none()
+
+    async def set_scraper_credential(self, site: str, value: str) -> ScraperCredential:
+        """Upsert, like set_active_llm_setting — one row per site. Resets
+        last_check_status/last_checked_at: a freshly-pasted cookie hasn't
+        been tested yet, so any stale prior result must not linger and look
+        current in the UI."""
+        existing = await self.get_scraper_credential(site)
+        if existing:
+            existing.value = value
+            existing.last_check_status = None
+            existing.last_checked_at = None
+            existing.updated_at = datetime.now(timezone.utc)
+            await self._s.commit()
+            await self._s.refresh(existing)
+            return existing
+
+        credential = ScraperCredential(site=site, value=value)
+        self._s.add(credential)
+        await self._s.commit()
+        await self._s.refresh(credential)
+        return credential
+
+    async def record_scraper_credential_check(self, site: str, status: str) -> Optional[ScraperCredential]:
+        """Called by check_scraper_credential_task (worker) after actually
+        asking LinkedIn whether the cookie still authenticates. Returns None
+        if the credential was deleted/replaced between the check starting
+        and finishing, rather than resurrecting a row for a site that no
+        longer has one — `status` is one of 'valid'/'invalid'/'error'."""
+        existing = await self.get_scraper_credential(site)
+        if existing is None:
+            return None
+        existing.last_check_status = status
+        existing.last_checked_at = datetime.now(timezone.utc)
+        await self._s.commit()
+        await self._s.refresh(existing)
+        return existing

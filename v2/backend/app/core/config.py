@@ -77,6 +77,21 @@ class Settings(BaseSettings):
     default_min_match_score: float = Field(0.40)
     default_max_experience_years: Optional[int] = Field(None)
 
+    # ── CORS (Phase 8) — the frontend (localhost:5173 by default) and the API
+    #    (localhost:8000) are different origins even on the same machine, since
+    #    they differ by port; the browser enforces CORS regardless of both
+    #    being "localhost". Comma-separated so FRONTEND_PORT/a prod domain can
+    #    be added via env without a code change. http://frontend:5173 (the
+    #    Compose service's own hostname) is included for container-to-
+    #    container browser verification (e.g. a Playwright script running
+    #    inside the worker container) — harmless for real usage, since a
+    #    real user's browser is never actually served from that origin.
+    cors_allowed_origins: str = Field("http://localhost:5173,http://127.0.0.1:5173,http://frontend:5173")
+
+    @property
+    def cors_allowed_origins_list(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_allowed_origins.split(",") if origin.strip()]
+
 
 @lru_cache
 def get_settings() -> Settings:

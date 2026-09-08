@@ -135,6 +135,15 @@ class ScrapeRun(Base):
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="running")
     config_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
+    # Cooperative cancellation: arq has no built-in "abort this running task"
+    # signal that a long-lived async generator loop like
+    # scrape_service.run_scrape_pipeline can react to mid-flight, so a
+    # "Stop" action just raises this flag — the loop checks it once between
+    # each batch (the only sane granularity: a single batch's own LLM call
+    # can't be interrupted mid-flight anyway) and exits early with
+    # status="cancelled" the next time it looks. Best-effort, not instant.
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
     jobs_seen: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     jobs_saved: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     jobs_rejected: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -242,6 +251,37 @@ class LLMSetting(Base):
     temperature: Mapped[float] = mapped_column(Float, nullable=False, default=0.1)
     max_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=2000)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), onupdate=func.now())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ScraperCredential — per-site session credential, UI-editable, no restart
+# needed (Phase 8: previously LI_AT_COOKIE was env-only, requiring a worker
+# restart to rotate — LinkedIn cookies expire ~every 30 days in practice, so
+# that was a recurring real friction point, not a one-time setup cost).
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ScraperCredential(Base):
+    __tablename__ = "scraper_credentials"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    # One row per site (unique) rather than a LinkedIn-specific table/column
+    # — FR-1.3 says a new scraper adapter needs no other code changes beyond
+    # registering it; a future adapter needing its own session credential
+    # fits this same table instead of a schema change. `value` is a single
+    # opaque string (a cookie today) rather than a JSONB blob of named
+    # fields — deliberately minimal for the one real shape that exists now;
+    # a site needing multiple credential fields is a real future migration,
+    # not something to design in blind today.
+    site: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    # Set by check_scraper_credential_task (worker, Playwright) after a
+    # "Test cookie" request from Settings — the API container has no
+    # Playwright to ask LinkedIn itself (architecture.md: Playwright is
+    # worker-only, ~300MB+ dependency the API doesn't need for anything
+    # else), so this is fire-and-forget + poll, same shape as a scrape run.
+    last_check_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), onupdate=func.now())
 
 

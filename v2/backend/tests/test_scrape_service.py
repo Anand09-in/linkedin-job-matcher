@@ -218,6 +218,35 @@ async def test_broken_batch_does_not_abort_the_run(repo):
     assert saved[0].link.endswith("/good")
 
 
+async def test_credential_precheck_failure_marks_run_failed_before_scraping(repo):
+    """LinkedInScraper.check_credential's real motivation: an expired
+    session cookie doesn't error, it just makes every job look like a
+    genuine zero-match query. The precheck (an OPTIONAL per-adapter hook —
+    _FakeScraper above has none, and every test using it is proof that's a
+    true no-op) should fail the run BEFORE any batch is even requested."""
+    resume = await _make_resume(repo)
+    pipeline = await _make_pipeline(repo, resume)
+    scrape_called = False
+
+    class _BadCredentialScraper:
+        async def check_credential(self):
+            return False, "simulated: session cookie is invalid or expired"
+
+        async def scrape(self, config):
+            nonlocal scrape_called
+            scrape_called = True
+            yield [_raw_job("should-never-be-seen")]
+
+    with patch("app.services.scrape_service.get_scraper", return_value=_BadCredentialScraper()), \
+         _patch_llm(), _patch_parse_resume():
+        result = await run_scrape_pipeline(repo, pipeline)
+
+    assert result["status"] == "failed"
+    assert "invalid or expired" in result["errors"][0]
+    assert result["jobs_seen"] == 0
+    assert scrape_called is False
+
+
 async def test_scraper_adapter_failure_marks_run_failed(repo):
     """The OTHER failure mode (system-design.md §1.1): the adapter itself
     can't reach the site at all -> the whole run fails, unlike a batch-level
@@ -237,6 +266,39 @@ async def test_scraper_adapter_failure_marks_run_failed(repo):
     assert result["status"] == "failed"
     assert result["jobs_saved"] == 0
     assert len(result["errors"]) == 1
+
+
+async def test_cancellation_stops_the_run_before_the_next_batch(repo):
+    """Pipelines page "Stop" action (cooperative cancellation, see
+    ScrapeRun.cancel_requested's docstring): the flag is only checked
+    BETWEEN batches, so a batch already yielded when it's raised still gets
+    fully processed, but the next one never does."""
+    resume = await _make_resume(repo)
+    pipeline = await _make_pipeline(repo, resume)
+    batch1 = [_raw_job("a")]
+    batch2 = [_raw_job("b")]  # must never be seen/scored
+    analysis = BatchJobAnalysis(results=[JobAnalysisResult(job_index=0, match_score=0.9)])
+
+    class _CancellingScraper:
+        """Simulates a "Stop" request arriving while batch1 is being
+        processed — by the time the loop asks for the next batch, cancel_requested is already set."""
+
+        async def scrape(self, config):
+            yield batch1
+            runs = await repo.list_scrape_runs(pipeline_id=pipeline.id, limit=1)
+            await repo.request_scrape_run_cancellation(runs[0].id)
+            yield batch2
+
+    with patch("app.services.scrape_service.get_scraper", return_value=_CancellingScraper()), \
+         _patch_llm(), _patch_parse_resume(), \
+         patch("app.services.scrape_service.analyze_batch", AsyncMock(return_value=analysis)):
+        result = await run_scrape_pipeline(repo, pipeline)
+
+    assert result["status"] == "cancelled"
+    assert result["jobs_seen"] == 1  # only batch1
+    saved = await repo.list_jobs(pipeline_id=pipeline.id)
+    assert len(saved) == 1
+    assert saved[0].link.endswith("/a")
 
 
 async def test_resume_profile_parse_failure_marks_run_failed(repo):

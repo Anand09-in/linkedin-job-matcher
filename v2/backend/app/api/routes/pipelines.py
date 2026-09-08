@@ -13,7 +13,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.dependencies import get_repo
-from app.api.models import PipelineCreateRequest, PipelineResponse, PipelineUpdateRequest, RejectedJobResponse
+from app.api.models import DeletedCountResponse, PipelineCreateRequest, PipelineResponse, PipelineUpdateRequest, RejectedJobResponse
 from app.domain.repository import Repository
 
 router = APIRouter(prefix="/pipelines", tags=["Pipelines"])
@@ -72,3 +72,16 @@ async def list_rejected_jobs(
         raise HTTPException(status_code=404, detail=f"Pipeline {pipeline_id} not found")
     rejected = await repo.list_rejected_jobs(pipeline_id=pipeline_id, scrape_run_id=scrape_run_id, limit=limit)
     return [RejectedJobResponse.model_validate(r) for r in rejected]
+
+
+@router.delete("/{pipeline_id}/scrape-runs", response_model=DeletedCountResponse)
+async def clear_scrape_runs(pipeline_id: uuid.UUID, repo: Repository = Depends(get_repo)):
+    """Pipelines page "clear run history" action. Never touches a
+    currently-`running` run (Repository.delete_scrape_runs) — deletes
+    everything else, and the RejectedJob audit rows that belonged to those
+    runs go with them (cascade), while jobs those runs saved keep existing,
+    just losing their run attribution."""
+    if await repo.get_pipeline(pipeline_id) is None:
+        raise HTTPException(status_code=404, detail=f"Pipeline {pipeline_id} not found")
+    deleted = await repo.delete_scrape_runs(pipeline_id)
+    return DeletedCountResponse(deleted_count=deleted)

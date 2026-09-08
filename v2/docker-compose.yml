@@ -114,6 +114,16 @@ services:
       VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
     ports:
       - "${FRONTEND_PORT:-5173}:5173"
+    volumes:
+      # Live source mount for Vite HMR — added in Phase 8 (before this, api/
+      # worker/frontend all baked source into the image at build time, which
+      # meant every one-line edit needed a full rebuild; not viable for the
+      # much higher edit-and-see-it iteration rate frontend work needs).
+      # The anonymous /app/node_modules volume stops the host bind (which has
+      # no node_modules at all) from shadowing what npm install already put
+      # in the image.
+      - ./frontend:/app
+      - /app/node_modules
     depends_on:
       - api
     restart: unless-stopped

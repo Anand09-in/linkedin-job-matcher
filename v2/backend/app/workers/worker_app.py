@@ -15,7 +15,7 @@ from loguru import logger
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.scrapers.bootstrap import bootstrap as bootstrap_scrapers
-from app.workers.tasks import ping_task, run_scrape_task, salary_lookup_task
+from app.workers.tasks import check_scraper_credential_task, ping_task, run_scrape_task, salary_lookup_task
 
 settings = get_settings()
 
@@ -31,7 +31,7 @@ async def on_shutdown(ctx):
 
 
 class WorkerSettings:
-    functions = [ping_task, run_scrape_task, salary_lookup_task]
+    functions = [ping_task, run_scrape_task, salary_lookup_task, check_scraper_credential_task]
     on_startup = on_startup
     on_shutdown = on_shutdown
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
