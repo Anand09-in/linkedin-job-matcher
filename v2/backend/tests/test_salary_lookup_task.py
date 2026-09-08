@@ -39,7 +39,7 @@ async def test_salary_lookup_task_persists_benchmark(repo, db_session):
     fake_benchmark = SalaryBenchmark(min_amount=1200000, max_amount=1800000, currency="INR", confidence="medium", source_note="test")
 
     with patch("app.workers.tasks.AsyncSessionLocal", return_value=_SessionCtx(db_session)), \
-         patch("app.workers.tasks.get_llm", return_value=object()), \
+         patch("app.workers.tasks.get_llm", AsyncMock(return_value=object())), \
          patch("app.workers.tasks.get_salary_benchmark", AsyncMock(return_value=fake_benchmark)):
         result = await salary_lookup_task(ctx={}, job_id=str(job.id))
 
@@ -58,7 +58,7 @@ async def test_salary_lookup_task_failure_does_not_touch_match_score(repo, db_se
     job = await _make_job(repo, pipeline)
 
     with patch("app.workers.tasks.AsyncSessionLocal", return_value=_SessionCtx(db_session)), \
-         patch("app.workers.tasks.get_llm", return_value=object()), \
+         patch("app.workers.tasks.get_llm", AsyncMock(return_value=object())), \
          patch("app.workers.tasks.get_salary_benchmark", AsyncMock(side_effect=RuntimeError("simulated search failure"))):
         result = await salary_lookup_task(ctx={}, job_id=str(job.id))
 
@@ -76,7 +76,7 @@ async def test_salary_lookup_task_is_idempotent(repo, db_session):
     fake_benchmark = SalaryBenchmark(min_amount=1000000, max_amount=1500000, confidence="low", source_note="test", currency="INR")
 
     with patch("app.workers.tasks.AsyncSessionLocal", return_value=_SessionCtx(db_session)), \
-         patch("app.workers.tasks.get_llm", return_value=object()), \
+         patch("app.workers.tasks.get_llm", AsyncMock(return_value=object())), \
          patch("app.workers.tasks.get_salary_benchmark", AsyncMock(return_value=fake_benchmark)):
         await salary_lookup_task(ctx={}, job_id=str(job.id))
         await salary_lookup_task(ctx={}, job_id=str(job.id))

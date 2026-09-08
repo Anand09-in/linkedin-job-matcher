@@ -243,3 +243,51 @@ class LLMSetting(Base):
     max_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=2000)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), onupdate=func.now())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FeatureResult — on-demand feature cache (FR-6.3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class FeatureResult(Base):
+    """
+    Caches one on-demand feature's output per (job, resume, feature, params)
+    so re-opening a previously generated result (e.g. reopening a job's
+    cover letter tab) doesn't re-call the LLM (FR-6.3) — until the user
+    explicitly asks to regenerate.
+
+    `params_key` (a canonical `json.dumps(params, sort_keys=True)` computed
+    by feature_service.py) is part of the cache identity, not just
+    job/resume/feature: a cover letter's `tone` or a referral message's
+    `contact_name` genuinely changes the output, so "the same request" has
+    to mean the same params too, not just the same job — otherwise a second
+    request for a *different* tone would wrongly serve the first tone's
+    cached letter. resume_id is nullable because it's copied from whatever
+    resume the job's pipeline was bound to at request time (FR-1A.8) — most
+    Phase 6 features require one and are rejected upstream if absent, but
+    company_research doesn't need a resume at all.
+
+    No DB-level uniqueness constraint on (job_id, resume_id, feature,
+    params_key): Postgres treats NULL != NULL in a unique index, so
+    resume_id being NULL on every company_research row (no resume needed)
+    would silently defeat that constraint for exactly the feature most
+    likely to hit it. Same approach as LLMSetting's single active row above
+    — enforced by application-level read-before-write
+    (Repository.get_cached_feature_result / save_feature_result), not a DB
+    constraint.
+    """
+
+    __tablename__ = "feature_results"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    resume_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("resumes.id", ondelete="SET NULL"), nullable=True
+    )
+    feature: Mapped[str] = mapped_column(String(50), nullable=False)
+    params: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    params_key: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    result: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

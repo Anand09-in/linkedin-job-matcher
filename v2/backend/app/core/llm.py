@@ -18,8 +18,14 @@ API, which formats messages correctly per model without that branching.
 architecture.md §1 / FR-3: this is the ONLY place any code constructs an LLM
 client — extraction+matching (llm_tasks/batch_extract.py), salary synthesis
 (services/salary_service.py), and every on-demand feature all call get_llm()
-here. Phase 5 adds reading the active model from the DB LLM_SETTING row
-instead of only the env var; Phase 0 only needs the provider mechanics.
+here.
+
+Phase 5 (FR-3.2): get_llm() is now async and reads the active model from the
+DB LLMSetting row (via PUT /settings/llm — main.py) — changing the active
+model takes effect on the very next call, no container restart, matching
+the exit criteria in plan.md Phase 5. Falls back to the BEDROCK_MODEL env
+var only if no LLMSetting row exists yet (first boot, before anyone has set
+one via the API).
 
 `llm_semaphore` (system-design.md §2.3) caps concurrent in-flight Bedrock
 calls across ALL pipelines in this worker process — sequential within one
@@ -46,7 +52,19 @@ llm_semaphore = asyncio.Semaphore(settings.llm_max_concurrent_calls)
 _NO_CHAT_PREFIXES = ("google.", "amazon.titan-text", "cohere.command-text")
 
 
-def get_llm(
+async def _get_active_llm_setting():
+    """Isolated import to avoid a hard module-level dependency from
+    core/llm.py (a low-level factory) on the domain/DB layer — only this
+    function touches it, and only when a call site didn't explicitly
+    override every field."""
+    from app.domain.db import AsyncSessionLocal
+    from app.domain.repository import Repository
+
+    async with AsyncSessionLocal() as session:
+        return await Repository(session).get_active_llm_setting()
+
+
+async def get_llm(
     model: Optional[str] = None,
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
@@ -55,12 +73,18 @@ def get_llm(
     Build and return a LangChain chat model for Bedrock.
 
     Callers should normally call get_llm() with no arguments — the active
-    model comes from Settings (Phase 0: env var; Phase 5: DB LLM_SETTING,
-    FR-3.1/3.2). Explicit args remain for tests.
+    model/temperature/max_tokens come from the DB LLMSetting row (FR-3.1/
+    3.2), falling back to env vars only if none has been set yet. Explicit
+    args always win over the DB setting (e.g. scrape_service.py's larger
+    batch-extraction max_tokens) — they're an override, not a default.
     """
-    m = model or settings.bedrock_model
-    temp = temperature if temperature is not None else settings.llm_temperature
-    max_tok = max_tokens or settings.llm_max_tokens
+    active = None
+    if model is None or temperature is None or max_tokens is None:
+        active = await _get_active_llm_setting()
+
+    m = model or (active.model if active else None) or settings.bedrock_model
+    temp = temperature if temperature is not None else (active.temperature if active else settings.llm_temperature)
+    max_tok = max_tokens or (active.max_tokens if active else settings.llm_max_tokens)
 
     logger.debug(f"[LLM] provider=bedrock model={m} temperature={temp}")
 

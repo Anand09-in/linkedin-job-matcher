@@ -16,7 +16,7 @@ from typing import Optional
 
 from arq import create_pool
 from arq.connections import RedisSettings
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -69,6 +69,61 @@ async def health():
         redis_status = f"error: {e}"
 
     return {"status": "ok", "db": db_status, "redis": redis_status, "version": "0.0.1"}
+
+
+# ── Phase 5 (FR-3.1/3.2): the one active LLM config, read by core/llm.py on
+#    every call site. Real, non-debug endpoint — plan.md names it explicitly
+#    as the exception to "everything else waits for Phase 7". ──────────────
+
+class LLMSettingResponse(BaseModel):
+    provider: str
+    model: str
+    temperature: float
+    max_tokens: int
+
+
+class LLMSettingUpdateRequest(BaseModel):
+    provider: str = "bedrock"
+    model: str
+    temperature: float = 0.1
+    max_tokens: int = 2000
+
+
+@app.get("/settings/llm", response_model=LLMSettingResponse)
+async def get_llm_setting():
+    """Falls back to the env-configured default if no LLMSetting row has
+    been created yet (first boot, before PUT has ever been called)."""
+    async with AsyncSessionLocal() as session:
+        repo = Repository(session)
+        active = await repo.get_active_llm_setting()
+        if active is None:
+            return LLMSettingResponse(
+                provider="bedrock",
+                model=settings.bedrock_model,
+                temperature=settings.llm_temperature,
+                max_tokens=settings.llm_max_tokens,
+            )
+        return LLMSettingResponse(
+            provider=active.provider, model=active.model,
+            temperature=active.temperature, max_tokens=active.max_tokens,
+        )
+
+
+@app.put("/settings/llm", response_model=LLMSettingResponse)
+async def update_llm_setting(body: LLMSettingUpdateRequest):
+    """Takes effect on the very next get_llm() call — a new scrape run's
+    extraction and any on-demand feature call both pick it up with no
+    container restart (Phase 5 exit criterion, plan.md)."""
+    async with AsyncSessionLocal() as session:
+        repo = Repository(session)
+        updated = await repo.set_active_llm_setting(
+            provider=body.provider, model=body.model,
+            temperature=body.temperature, max_tokens=body.max_tokens,
+        )
+        return LLMSettingResponse(
+            provider=updated.provider, model=updated.model,
+            temperature=updated.temperature, max_tokens=updated.max_tokens,
+        )
 
 
 # ── Phase 0 smoke-test endpoints — remove once Phase 3's real scrape trigger exists ──
@@ -261,5 +316,59 @@ async def debug_referral_contacts(
     if not company or not job_title:
         return {"error": "Provide either job_id, or both company and job_title"}
 
-    result = await find_referral_contacts(company, job_title, get_llm())
+    result = await find_referral_contacts(company, job_title, await get_llm())
     return result.model_dump()
+
+
+# ── Phase 6: on-demand features (FR-6) — real, non-debug endpoint per plan.md,
+#    same exception as Phase 5's /settings/llm to the "everything waits for
+#    Phase 7" rule. ────────────────────────────────────────────────────────
+
+class FeatureRequestBody(BaseModel):
+    """Optional per-feature parameters — most features need none of these.
+    Unrecognized/inapplicable keys are silently ignored by
+    feature_service._normalize_params (each feature only reads its own
+    declared default_params), so one shared body model can cover every
+    feature without per-feature request schemas."""
+
+    tone: Optional[str] = None
+    channel: Optional[str] = None
+    contact_name: Optional[str] = None
+    contact_title: Optional[str] = None
+    regenerate: bool = False
+
+
+@app.post("/features/{feature}/{job_id}")
+async def run_on_demand_feature(feature: str, job_id: str, body: FeatureRequestBody = FeatureRequestBody()):
+    """
+    FR-6.2: synchronous on-demand feature call (button click -> loading
+    state -> result), no queue. FR-6.3: cached per (job, resume, feature,
+    params) — a second identical request is served from the cache without a
+    new LLM call, unless `regenerate: true` is passed.
+
+    Known features (see feature_service.FEATURES for the authoritative
+    list/params): cover_letter (tone), interview_prep, company_research (no
+    resume needed), resume_improvement, referral_message (channel,
+    contact_name, contact_title), negotiation_prep.
+    """
+    from app.core.llm import get_llm
+    from app.domain.exceptions import FeatureRequiresResumeError, UnknownFeatureError
+    from app.services.feature_service import FEATURES, run_feature
+
+    raw_params = {k: v for k, v in body.model_dump().items() if k != "regenerate" and v is not None}
+    # max_tokens is baked into the Bedrock client at construction time, so a
+    # feature needing more headroom (interview_prep) must request it via
+    # get_llm() itself, not after — see FeatureSpec.max_tokens's docstring.
+    spec = FEATURES.get(feature)
+
+    async with AsyncSessionLocal() as session:
+        repo = Repository(session)
+        try:
+            llm = await get_llm(max_tokens=spec.max_tokens if spec else None)
+            return await run_feature(repo, feature, uuid.UUID(job_id), raw_params, llm, regenerate=body.regenerate)
+        except UnknownFeatureError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except LookupError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except FeatureRequiresResumeError as e:
+            raise HTTPException(status_code=422, detail=str(e))

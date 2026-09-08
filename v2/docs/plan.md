@@ -73,9 +73,13 @@ Each phase has a goal, deliverables, and exit criteria — a phase isn't "done" 
 **Exit criteria:** switching the active Bedrock model via API (ahead of a real Settings UI existing) changes which model both a new scrape run's extraction and an on-demand feature call use, with no container restart.
 
 ## Phase 6 — On-demand features
-**Goal:** port v1's `features/` modules to the single-LLM model and per-job/per-click UX (FR-6).
+**Goal:** port v1's `features/` modules to the single-LLM model and per-job/per-click UX (FR-6) — scope narrowed and extended by explicit user decision when this phase started (see FR-6.1).
 
-- Port cover letter, ATS score, interview prep, company research/intel, resume improvement, career path — logic carries over largely as-is; the only structural change is removing per-call model overrides (now implicit via Phase 5's active setting) and adding the result cache keyed by `(job_id, resume_id, feature)` (FR-6.3).
+- Port cover letter, interview prep, company research, resume improvement. ATS score (a deterministic, non-LLM scorer in v1) and career path were deliberately dropped, not ported — explicit user decision, not an oversight.
+- Two features added in their place, chosen to pair with work already built in earlier phases rather than duplicate it: referral outreach message drafting (pairs with Phase 4's referral_service.py, which only ever surfaced contacts, never drafted outreach) and salary negotiation prep (pairs with Phase 4's automatic salary_service.py enrichment, reusing the `Job.salary_benchmark` it already computed instead of searching again).
+- Every feature uses `.with_structured_output()` against its own Pydantic schema (llm_tasks/schemas.py), not v1's manual `json.loads`/regex-fence-stripping per feature module — a real simplification, and it removes v1's silent-failure mode where a malformed response degraded to an empty/placeholder result instead of a clear error.
+- All 6 features go through one `feature_service.run_feature()` (FR-1A.8: resume is always the one the job's pipeline was bound to — no separate "which resume" prompt) — the only structural change from v1's model, since a per-call model/provider override surface no longer exists after Phase 5. Company research is the one feature that doesn't need a resume at all (it's not about candidate fit).
+- Result cache keyed by `(job_id, resume_id, feature, params)` (FR-6.3) — `params` had to be part of the key, not just an FR-6.3 afterthought: a cover letter's `tone` or a referral message's `contact_name` genuinely changes the output, so two different params values are two different cache entries, not a hit.
 - `POST /features/{feature}/{job_id}` endpoints, synchronous (system-design.md §"On-demand features" — deliberately not queued).
 
 **Exit criteria:** each ported feature produces output for a real job/resume pair and is served from cache on a second identical request without a new LLM call (verified via call count, not just response shape).

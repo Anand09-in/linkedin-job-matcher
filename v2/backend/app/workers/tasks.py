@@ -69,7 +69,7 @@ async def salary_lookup_task(ctx, job_id: str) -> dict:
             raise ValueError(f"Job {job_id} not found")
 
         try:
-            llm = get_llm()
+            llm = await get_llm()
             benchmark = await get_salary_benchmark(
                 job_title=job.title,
                 company=job.company,

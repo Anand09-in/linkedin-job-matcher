@@ -174,7 +174,7 @@ async def run_scrape_pipeline(
     # A batch returns up to config.batch_size full structured results in one
     # response — needs more output headroom than the general-purpose default
     # (see llm_batch_extract_max_tokens's docstring for why this is separate).
-    llm = get_llm(max_tokens=settings.llm_batch_extract_max_tokens)
+    llm = await get_llm(max_tokens=settings.llm_batch_extract_max_tokens)
 
     jobs_seen = jobs_saved = jobs_rejected = 0
     errors: list[str] = []

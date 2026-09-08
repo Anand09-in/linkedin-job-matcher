@@ -10,11 +10,45 @@ scored" unambiguously.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
 
 _MAX_SKILLS = 8
+
+
+@dataclass
+class JobContext:
+    """Plain data carrier for what a Phase 6 feature prompt needs about a
+    Job row — assembled by services/feature_service.py from the ORM row so
+    prompts.py (llm_tasks layer) never depends on app.domain directly."""
+
+    title: str
+    company: str
+    location: Optional[str] = None
+    seniority_level: Optional[str] = None
+    employment_type: Optional[str] = None
+    remote_policy: Optional[str] = None
+    description: Optional[str] = None
+    skills_required: list[str] = field(default_factory=list)
+    skills_nice_to_have: list[str] = field(default_factory=list)
+    matched_skills: list[str] = field(default_factory=list)
+    missing_skills: list[str] = field(default_factory=list)
+    salary_benchmark: Optional[dict] = None
+
+
+@dataclass
+class ResumeContext:
+    """Plain data carrier combining a resume's cached ResumeProfile with its
+    raw text (only resume_improvement.py needs the raw text, for a deeper
+    excerpt than the condensed profile provides)."""
+
+    current_title: Optional[str] = None
+    total_experience_years: Optional[float] = None
+    skills: list[str] = field(default_factory=list)
+    summary: Optional[str] = None
+    raw_text: str = ""
 
 
 class JobAnalysisResult(BaseModel):
@@ -237,4 +271,282 @@ class ReferralSearchResult(BaseModel):
         """Same defensive backstop as the other list fields in this module."""
         if isinstance(value, list) and len(value) > 10:
             return value[:10]
+        return value
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 6 — on-demand features (FR-6). Each schema below is deliberately just
+# the LLM-authored content: derived/echo fields (word counts, which contact
+# was addressed, timestamps, cache flags) are assembled by
+# services/feature_service.py afterward, not asked of the model — mirroring
+# how job_index above is model-filled bookkeeping but word counts etc. in
+# earlier features were always computed in code, never trusted to the model.
+#
+# Every field that requires the model to actually reason about THIS job/
+# resume (not a placeholder-safe default) is declared `Field(...)` with no
+# default, per the lesson repeated three times already in Phase 3/4 (see
+# ResumeProfile's and SalaryBenchmark's docstrings): a Pydantic default shows
+# up as a `"default"` key in the structured-output schema, which models read
+# as "fine to leave as-is," not "must fill in." Every list field caps length
+# via `max_length` (schema-level, a stronger signal than prose) AND a
+# defensive `@field_validator` backstop, since a model can still ignore a
+# maxItems hint under some inputs (also observed directly in Phase 3).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_MAX_FEATURE_LIST = 10
+
+
+class CoverLetterResult(BaseModel):
+    cover_letter: str = Field(
+        ...,
+        description=(
+            "REQUIRED. The complete cover letter body text, ready to paste as-is — body only, no "
+            "address, date, subject line, greeting placeholder, or sign-off. Exactly 3 paragraphs: "
+            "(1) a hook referencing something concrete and specific about this exact role/company from "
+            "the job description, (2) one specific, real achievement from the candidate's work history "
+            "tied to a stated requirement, (3) a one-sentence close on why this role is the logical next "
+            "step plus a one-sentence call to action. Never use cliché phrases like 'excited to apply', "
+            "'passionate about', 'team player', 'results-driven', 'hard worker', 'think outside the box', "
+            "or open with the word 'I'."
+        ),
+    )
+
+
+class InterviewQuestion(BaseModel):
+    category: str = Field(
+        ...,
+        description="REQUIRED: exactly one of 'technical', 'behavioural', 'system_design', or 'culture_fit'.",
+    )
+    question: str = Field(
+        ...,
+        description=(
+            "The full interview question — highly specific to THIS job's actual tech stack/"
+            "responsibilities from its description, never generic boilerplate."
+        ),
+    )
+    answer_framework: str = Field(
+        ...,
+        description="How to structure the answer, e.g. 'STAR', '3-part', 'SOAR', 'deep-dive', or 'opinion-then-evidence'.",
+    )
+    key_points: list[str] = Field(
+        default_factory=list,
+        max_length=4,
+        description="3-4 specific, actionable things the candidate should actually say in their answer.",
+    )
+
+    @field_validator("key_points", mode="before")
+    @classmethod
+    def _cap_key_points(cls, value):
+        if isinstance(value, list) and len(value) > 4:
+            return value[:4]
+        return value
+
+
+class InterviewPrepResult(BaseModel):
+    questions: list[InterviewQuestion] = Field(
+        ...,
+        max_length=12,
+        description=(
+            "Exactly 12 questions in this order: 3 technical, 3 behavioural, 3 system_design, 3 "
+            "culture_fit — technical ones must reference actual technologies named in the JD; "
+            "system_design ones should be scale/architecture problems relevant to this company's "
+            "likely use case; complexity calibrated to the job's seniority level."
+        ),
+    )
+    prep_tips: list[str] = Field(
+        default_factory=list,
+        max_length=5,
+        description=(
+            "4-5 concrete prep tips specific to this company/role/candidate — e.g. how to frame a "
+            "flagged skill gap, what to research beforehand — never generic advice like 'be yourself'."
+        ),
+    )
+
+    @field_validator("questions", mode="before")
+    @classmethod
+    def _sanitize_questions(cls, value):
+        """
+        Defensive backstop, not just the schema's max_length declaration
+        above: confirmed live that Mistral Large generating this 12-item
+        list of richly detailed objects can truncate mid-item under a
+        single-feature token budget, leaving a dict like
+        {"category": "system_design"} with `question`/`answer_framework`
+        missing — see config.llm_interview_prep_max_tokens's docstring for
+        the token-budget fix. Without this, Pydantic raises on that one
+        malformed item and crashes the ENTIRE feature call. Same "the LLM
+        proposes, the system decides" principle as the skill-list caps
+        elsewhere in this module — drop only the malformed items rather
+        than fail the whole request over one incomplete one.
+        """
+        if not isinstance(value, list):
+            return value
+        cleaned = [
+            item
+            for item in value
+            if not isinstance(item, dict) or (item.get("question") and item.get("answer_framework"))
+        ]
+        return cleaned[:12]
+
+    @field_validator("prep_tips", mode="before")
+    @classmethod
+    def _cap_prep_tips(cls, value):
+        if isinstance(value, list) and len(value) > 5:
+            return value[:5]
+        return value
+
+
+class CompanyResearchResult(BaseModel):
+    domain: Optional[str] = Field(
+        None, description="Industry domain, e.g. fintech, healthtech, saas, ecommerce, enterprise, gaming, consulting."
+    )
+    size_hint: Optional[str] = Field(None, description="'startup', 'mid-size', or 'enterprise', inferred from the posting/company signals.")
+    tech_stack_hints: list[str] = Field(
+        default_factory=list, max_length=_MAX_FEATURE_LIST,
+        description="Specific technologies/tools inferred from the job description's actual wording.",
+    )
+    culture_signals: list[str] = Field(
+        default_factory=list, max_length=5,
+        description="3-5 specific observations about work culture inferred from the JD's wording and company type.",
+    )
+    green_flags: list[str] = Field(
+        default_factory=list, max_length=5, description="Specific positive signals worth noting — empty list if genuinely none stand out."
+    )
+    red_flags: list[str] = Field(
+        default_factory=list, max_length=5,
+        description="Specific concerns or warning signs — be honest; empty list if none, never invent one just to seem balanced.",
+    )
+    overall_impression: str = Field(
+        ...,
+        description=(
+            "REQUIRED, never generic: 2-3 sentence honest, candid assessment of what this company and "
+            "role is likely to be like for THIS candidate — not a marketing pitch."
+        ),
+    )
+
+    @field_validator("tech_stack_hints", "culture_signals", "green_flags", "red_flags", mode="before")
+    @classmethod
+    def _cap_lists(cls, value):
+        if isinstance(value, list) and len(value) > _MAX_FEATURE_LIST:
+            return value[:_MAX_FEATURE_LIST]
+        return value
+
+
+class ResumeSuggestion(BaseModel):
+    section: str = Field(
+        ..., description="Which resume section this applies to: 'Professional Summary', 'Skills', 'Work Experience', 'Achievements', or 'Format'."
+    )
+    priority: str = Field(..., description="REQUIRED: 'high', 'medium', or 'low'.")
+    issue: str = Field(..., description="What's specifically wrong or missing, relative to THIS job's requirements.")
+    suggestion: str = Field(..., description="The specific, actionable fix — never vague advice like 'improve your summary'.")
+    example: Optional[str] = Field(None, description="A concrete rewritten example (a bullet point or phrase), where applicable.")
+
+
+class ResumeImprovementResult(BaseModel):
+    overall_fit_grade: str = Field(
+        ...,
+        description=(
+            "REQUIRED, your own honest judgment call — not a placeholder: 'A' (strong match), 'B' "
+            "(good, small fixes needed), 'C' (needs real work), or 'D' (significant gaps)."
+        ),
+    )
+    suggestions: list[ResumeSuggestion] = Field(
+        default_factory=list, max_length=7, description="4-7 suggestions covering different resume sections, ordered by priority."
+    )
+    keywords_to_add: list[str] = Field(
+        default_factory=list, max_length=_MAX_FEATURE_LIST,
+        description="Exact keyword strings taken from the job description that are missing from the candidate's current skill list.",
+    )
+    summary_rewrite: str = Field(
+        ...,
+        description=(
+            "REQUIRED, ready-to-paste: a full rewritten Professional Summary (3-4 sentences) tailored "
+            "specifically to this exact job title and company — no placeholders."
+        ),
+    )
+    top_actions: list[str] = Field(
+        default_factory=list, max_length=3,
+        description="The 1-3 highest-impact, specific actions to take before applying — e.g. exact skill/keyword to add, never vague.",
+    )
+
+    @field_validator("suggestions", mode="before")
+    @classmethod
+    def _cap_suggestions(cls, value):
+        if isinstance(value, list) and len(value) > 7:
+            return value[:7]
+        return value
+
+    @field_validator("keywords_to_add", mode="before")
+    @classmethod
+    def _cap_keywords(cls, value):
+        if isinstance(value, list) and len(value) > _MAX_FEATURE_LIST:
+            return value[:_MAX_FEATURE_LIST]
+        return value
+
+    @field_validator("top_actions", mode="before")
+    @classmethod
+    def _cap_top_actions(cls, value):
+        if isinstance(value, list) and len(value) > 3:
+            return value[:3]
+        return value
+
+
+class ReferralMessageResult(BaseModel):
+    """A single field on purpose: channel/contact name/tone are caller-
+    supplied context baked into the prompt (referral_message.py), not
+    something the model needs to classify or restate — one less place for
+    the model to drift from what was actually asked for."""
+
+    message: str = Field(
+        ...,
+        description=(
+            "REQUIRED. The complete outreach message text, ready to send as-is — personalized using "
+            "the specific contact name/title and job/company context given in the prompt, concise, no "
+            "generic filler, no unfilled placeholders like '[Name]', and respecting whatever "
+            "length/tone constraint the prompt specifies for the target channel."
+        ),
+    )
+
+
+class NegotiationPrepResult(BaseModel):
+    assessment: str = Field(
+        ...,
+        description=(
+            "REQUIRED: 2-3 honest sentences on where the candidate's target likely sits relative to "
+            "the job's estimated salary range given their experience level — say plainly if the "
+            "available salary data is too thin/low-confidence to anchor a number on, rather than "
+            "papering over it."
+        ),
+    )
+    target_ask: Optional[str] = Field(
+        None,
+        description=(
+            "A concrete opening figure or range to ask for, in the salary benchmark's own currency/"
+            "period — or null if the benchmark is missing/low-confidence and there's no honest basis "
+            "for a number (explain that in assessment instead of guessing one)."
+        ),
+    )
+    talking_points: list[str] = Field(
+        default_factory=list, max_length=6,
+        description="3-6 SPECIFIC leverage points using the candidate's actual background/skills and the salary data given — not generic negotiation advice.",
+    )
+    scripts: list[str] = Field(
+        default_factory=list, max_length=4, description="2-4 short, ready-to-say phrases for the actual negotiation conversation.",
+    )
+    risks_to_avoid: list[str] = Field(
+        default_factory=list, max_length=4,
+        description="Specific mistakes to avoid in THIS negotiation given the role's seniority/context — not generic tips like 'be confident'.",
+    )
+
+    @field_validator("talking_points", mode="before")
+    @classmethod
+    def _cap_talking_points(cls, value):
+        if isinstance(value, list) and len(value) > 6:
+            return value[:6]
+        return value
+
+    @field_validator("scripts", "risks_to_avoid", mode="before")
+    @classmethod
+    def _cap_lists(cls, value):
+        if isinstance(value, list) and len(value) > 4:
+            return value[:4]
         return value

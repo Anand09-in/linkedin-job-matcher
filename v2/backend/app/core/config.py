@@ -45,6 +45,18 @@ class Settings(BaseSettings):
     # calls (cover letter, etc.) don't need this much room.
     llm_batch_extract_max_tokens: int = Field(4000)
 
+    # interview_prep (Phase 6/FR-6) is a single-feature call but, unlike
+    # cover letter/company research/etc., its structured output is a 12-item
+    # list of richly detailed objects — comparably large to a batch
+    # extraction response, not a normal single-feature one. Confirmed live:
+    # under the default llm_max_tokens budget, Mistral Large truncated mid-
+    # item (a 9th question left with only its `category` field), which
+    # without schemas.py's InterviewPrepResult._sanitize_questions backstop
+    # would crash the whole feature call. Same fix pattern as
+    # llm_batch_extract_max_tokens above — its own setting, not a global
+    # bump, since most single-feature calls don't need this much room.
+    llm_interview_prep_max_tokens: int = Field(4000)
+
     # Cap on concurrent in-flight Bedrock calls across ALL pipelines in this
     # worker process (system-design.md §2.3) — sized conservatively since the
     # "safe" number is account-tier-specific; v1 had to serialize Bedrock

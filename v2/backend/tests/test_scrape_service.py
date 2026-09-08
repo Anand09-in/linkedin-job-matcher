@@ -49,7 +49,7 @@ def _patch_scraper(batches: list[list[RawJob]]):
 
 
 def _patch_llm():
-    return patch("app.services.scrape_service.get_llm", return_value=object())
+    return patch("app.services.scrape_service.get_llm", AsyncMock(return_value=object()))
 
 
 class _FakeArqRedis:

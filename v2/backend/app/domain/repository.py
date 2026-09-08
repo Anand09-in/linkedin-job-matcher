@@ -23,7 +23,7 @@ from sqlalchemy import and_, delete, func, nullslast, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import ResumeInUseError
-from app.domain.models import Job, LLMSetting, Pipeline, RejectedJob, Resume, ScrapeRun
+from app.domain.models import FeatureResult, Job, LLMSetting, Pipeline, RejectedJob, Resume, ScrapeRun
 
 
 class Repository:
@@ -398,3 +398,43 @@ class Repository:
         await self._s.commit()
         await self._s.refresh(setting)
         return setting
+
+    # ── FeatureResult — on-demand feature cache (FR-6.3) ─────────────────────────
+
+    async def get_cached_feature_result(
+        self, job_id: uuid.UUID, resume_id: Optional[uuid.UUID], feature: str, params_key: str
+    ) -> Optional[FeatureResult]:
+        """No DB-level uniqueness enforces this identity (see FeatureResult's
+        docstring for why) — order by newest and take one, so a rare
+        duplicate from a race condition just means "latest wins" instead of
+        a crash on multiple rows."""
+        q = (
+            select(FeatureResult)
+            .where(
+                FeatureResult.job_id == job_id,
+                FeatureResult.resume_id == resume_id,
+                FeatureResult.feature == feature,
+                FeatureResult.params_key == params_key,
+            )
+            .order_by(FeatureResult.created_at.desc())
+            .limit(1)
+        )
+        result = await self._s.execute(q)
+        return result.scalar_one_or_none()
+
+    async def save_feature_result(
+        self,
+        job_id: uuid.UUID,
+        resume_id: Optional[uuid.UUID],
+        feature: str,
+        params: dict,
+        params_key: str,
+        result: dict,
+    ) -> FeatureResult:
+        row = FeatureResult(
+            job_id=job_id, resume_id=resume_id, feature=feature, params=params, params_key=params_key, result=result
+        )
+        self._s.add(row)
+        await self._s.commit()
+        await self._s.refresh(row)
+        return row

@@ -2,7 +2,7 @@
 the one-time resume-parsing call (see resume_parser.py)."""
 from __future__ import annotations
 
-from app.llm_tasks.schemas import ResumeProfile
+from app.llm_tasks.schemas import JobContext, ResumeContext, ResumeProfile
 from app.scrapers.base import RawJob
 
 RESUME_PARSE_SYSTEM_PROMPT = """You are an expert technical recruiter.
@@ -173,4 +173,147 @@ def build_referral_synthesis_prompt(company: str, job_title: str, search_results
         f"TARGET COMPANY: {company}\n"
         f"ROLE OF INTEREST: {job_title}\n\n"
         f"SEARCH RESULTS:\n{search_results_text or '(no results found)'}\n"
+    )
+
+
+# ── Phase 6 — on-demand features (FR-6). Each takes a JobContext/
+#    ResumeContext pair built by feature_service.py from the DB, so a
+#    prompt-builder here never sees a SQLAlchemy row directly. ─────────────
+
+def _job_block(job: JobContext) -> str:
+    return (
+        f"Title: {job.title}\n"
+        f"Company: {job.company}\n"
+        f"Location: {job.location or 'unknown'}\n"
+        f"Seniority: {job.seniority_level or 'unknown'}\n"
+        f"Employment type: {job.employment_type or 'unknown'}\n"
+        f"Remote policy: {job.remote_policy or 'unknown'}\n"
+        f"Required skills: {', '.join(job.skills_required) or 'none extracted'}\n"
+        f"Nice-to-have skills: {', '.join(job.skills_nice_to_have) or 'none extracted'}\n"
+        f"Description:\n{(job.description or '')[:1500]}\n"
+    )
+
+
+def _resume_block(resume: ResumeContext) -> str:
+    return (
+        f"Current title: {resume.current_title or 'unknown'}\n"
+        f"Total experience: {resume.total_experience_years if resume.total_experience_years is not None else 'unknown'} years\n"
+        f"Skills: {', '.join(resume.skills) or 'none listed'}\n"
+        f"Summary: {resume.summary or 'none provided'}\n"
+    )
+
+
+COVER_LETTER_SYSTEM_PROMPT = """You are a career coach who writes sharp, memorable cover letters
+that never read like a template. Follow the cover_letter field's own description exactly — it is
+the full spec for structure, length, and banned phrases."""
+
+
+def build_cover_letter_prompt(job: JobContext, resume: ResumeContext, tone: str) -> str:
+    return (
+        f"Write a {tone} cover letter for this application.\n\n"
+        f"=== JOB ===\n{_job_block(job)}\n"
+        f"Skills this candidate already matches on this job: {', '.join(job.matched_skills) or 'none recorded'}\n\n"
+        f"=== CANDIDATE ===\n{_resume_block(resume)}"
+    )
+
+
+INTERVIEW_PREP_SYSTEM_PROMPT = """You are a senior hiring manager and technical interview coach.
+Generate interview questions highly specific to the job description and candidate background given —
+never generic. Every technical/system_design question must reference actual technologies or
+responsibilities from the JD."""
+
+
+def build_interview_prep_prompt(job: JobContext, resume: ResumeContext) -> str:
+    return (
+        f"=== JOB ===\n{_job_block(job)}\n"
+        f"=== CANDIDATE ===\n{_resume_block(resume)}\n"
+        f"Skills this candidate matches on this job: {', '.join(job.matched_skills) or 'none recorded'}\n"
+        f"Skill gaps flagged for this job: {', '.join(job.missing_skills) or 'none flagged'}\n"
+    )
+
+
+COMPANY_RESEARCH_SYSTEM_PROMPT = """You are a candid career advisor helping a job seeker evaluate
+whether a company/role is worth pursuing. Give an honest, balanced assessment, not a marketing
+pitch — flag real concerns when the JD's own wording suggests them. Be specific; avoid vague
+positives like "great culture" with nothing backing it."""
+
+
+def build_company_research_prompt(job: JobContext) -> str:
+    return f"=== JOB ===\n{_job_block(job)}"
+
+
+RESUME_IMPROVEMENT_SYSTEM_PROMPT = """You are an expert resume writer and ATS-optimisation
+specialist. Review a resume against one specific job description and give concrete, actionable
+improvements.
+
+Rules:
+- Be specific — name exact technologies, provide rewritten bullet points, quote exact phrasing.
+- Never give vague advice like "improve your summary" without showing EXACTLY how.
+- Prioritise changes that (a) add missing keywords an ATS will scan for and (b) prove impact with
+  numbers.
+- Keep suggestions realistic — don't invent skills the candidate doesn't have."""
+
+
+def build_resume_improvement_prompt(job: JobContext, resume: ResumeContext) -> str:
+    return (
+        f"=== TARGET JOB ===\n{_job_block(job)}\n"
+        f"Skills already flagged as MISSING for this job: {', '.join(job.missing_skills) or 'none flagged'}\n\n"
+        f"=== CURRENT RESUME (structured profile) ===\n{_resume_block(resume)}\n\n"
+        f"=== CURRENT RESUME (raw text excerpt) ===\n{(resume.raw_text or '')[:2500]}\n"
+    )
+
+
+REFERRAL_MESSAGE_SYSTEM_PROMPT = """You are helping a job seeker write a short outreach message
+to a potential referral contact. The message must sound like a real person wrote it — specific,
+brief, and genuinely tied to the shared context given, never a generic "I'd love to connect"
+template. It should reference something concrete: the role, a shared skill area, or the company."""
+
+
+def build_referral_message_prompt(
+    job: JobContext, resume: ResumeContext, channel: str, contact_name: str | None, contact_title: str | None
+) -> str:
+    contact_line = (
+        f"Contact: {contact_name}" + (f", {contact_title}" if contact_title else "") + f" at {job.company}\n"
+        if contact_name
+        else f"Contact: (no specific name given — write a message generic enough to send to any {job.company} employee in a related role)\n"
+    )
+    length_rule = (
+        "This is a LinkedIn CONNECTION REQUEST note — HARD LIMIT 300 characters, no greeting "
+        "placeholder, get straight to the point."
+        if channel == "linkedin_connection_note"
+        else "This is a LinkedIn DM to an existing connection or InMail — 3-5 short sentences, can be "
+        "slightly more detailed than a connection note."
+    )
+    return (
+        f"{contact_line}"
+        f"Channel: {channel}\n"
+        f"{length_rule}\n\n"
+        f"=== ROLE THE SENDER IS INTERESTED IN ===\n{_job_block(job)}\n"
+        f"=== SENDER'S BACKGROUND ===\n{_resume_block(resume)}\n"
+    )
+
+
+NEGOTIATION_PREP_SYSTEM_PROMPT = """You are a compensation negotiation coach. Given a job's
+estimated salary benchmark (from real web search data, not a guess) and a candidate's experience
+level, help them prepare to negotiate. Ground every talking point in the actual data given — never
+invent a number or achievement that wasn't provided. If the benchmark is missing or low-confidence,
+say so plainly and give strategy-only advice rather than fabricating a figure."""
+
+
+def build_negotiation_prep_prompt(job: JobContext, resume: ResumeContext) -> str:
+    if job.salary_benchmark:
+        sb = job.salary_benchmark
+        benchmark_block = (
+            f"Estimated range: {sb.get('min_amount')}-{sb.get('max_amount')} {sb.get('currency', '')} "
+            f"({sb.get('period', 'annual')})\n"
+            f"Confidence: {sb.get('confidence', 'unknown')}\n"
+            f"Source note: {sb.get('source_note', '')}\n"
+        )
+    else:
+        benchmark_block = "No salary benchmark is available yet for this job — give strategy-only advice, no invented figures.\n"
+
+    return (
+        f"=== JOB ===\n{_job_block(job)}\n"
+        f"=== SALARY BENCHMARK ===\n{benchmark_block}\n"
+        f"=== CANDIDATE ===\n{_resume_block(resume)}"
     )

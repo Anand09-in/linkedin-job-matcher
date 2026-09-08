@@ -97,7 +97,7 @@ async def db_session():
         await conn.execute(
             text(
                 "TRUNCATE TABLE jobs, rejected_jobs, scrape_runs, pipelines, "
-                "resumes, llm_settings RESTART IDENTITY CASCADE"
+                "resumes, llm_settings, feature_results RESTART IDENTITY CASCADE"
             )
         )
     await engine.dispose()

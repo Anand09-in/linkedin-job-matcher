@@ -5,7 +5,19 @@ plan, and the other docs it links to ([functional-requirements.md](docs/function
 [architecture.md](docs/architecture.md), [system-design.md](docs/system-design.md),
 [flow-diagrams.md](docs/flow-diagrams.md)) for the full design.
 
-**Status:** Phase 4 (Parallel salary enrichment) complete, plus an extra
+**Status:** Phase 6 (On-demand features) complete: cover letter, interview
+prep, company research, resume improvement, referral outreach message
+drafting, and salary negotiation prep — all via one shared `POST
+/features/{feature}/{job_id}`, one LLM call each, cached per (job, resume,
+feature, params) so a repeat request doesn't re-call the LLM. See the Phase
+6 section below for what changed from v1 and what was validated. Phase 5
+(Single LLM selection, UI-driven) complete. `GET`/`PUT /settings/llm` (real,
+non-debug endpoints) are the one place the active
+Bedrock model/temperature/max_tokens are set; `core/llm.py::get_llm()` is
+now async and reads that DB row on every call from every call site
+(extraction, salary synthesis, referral synthesis) — no per-feature
+model/provider override surface, no container restart needed to switch
+models. Phase 4 (Parallel salary enrichment) complete, plus an extra
 feature: on-demand referral-contact search. Every job saved by Phase 3's
 pipeline now automatically triggers `salary_lookup_task` (web search + one
 LLM call, fire-and-forget — never blocks scraping or affects a job's match
@@ -151,6 +163,94 @@ a silent fallback to unfiltered mode. Locked in with `test_resume_profile_is_par
 - `salary_lookup_task` is idempotent (safe to run twice) and a failure only
   marks `salary_enrichment_status="failed"` — it never touches a job's
   `match_score` or visibility (FR-5.3), verified with dedicated tests.
+
+**Phase 5 — single LLM selection, UI-driven (what was validated):**
+
+- `get_llm()` (`core/llm.py`) is now `async`: when a caller doesn't pass an
+  explicit `model`/`temperature`/`max_tokens`, it opens a short-lived session
+  and reads the one active `LLMSetting` row, falling back to the env-var
+  default only if no row exists yet (first boot, before `PUT /settings/llm`
+  has ever been called). An explicit arg (e.g. `scrape_service.py`'s larger
+  batch-extraction `max_tokens`) always wins over the DB row — it's an
+  override, not a default.
+- All 4 call sites updated to `await get_llm(...)`: batch extraction
+  (`scrape_service.py`), salary lookup (`workers/tasks.py`), and the
+  referral-contacts endpoint (`main.py`); all corresponding test mocks
+  switched from a plain `return_value=object()` patch to `AsyncMock`.
+- **Verified live, end to end, exactly matching the plan's exit criterion**:
+  `PUT /settings/llm` switched the active model from Mistral Large to Claude
+  3 Haiku with the containers already running (no rebuild, no restart); the
+  very next `/debug/referral-contacts` call failed with a Bedrock
+  `AccessDeniedException` specific to Haiku (this AWS account's Marketplace
+  subscription doesn't cover it) — itself proof the new model was actually
+  used, since Mistral Large already works. Switching back to Mistral Large
+  via the same endpoint, with no restart, made the identical call succeed
+  again immediately.
+- 64 tests pass (`docker compose exec worker pytest`) — rebuild the `api`/
+  `worker`/`migrate` images first if you're validating this locally, since
+  none of the three mount source as a live volume (`docker compose build
+  migrate api worker && docker compose up -d migrate api worker`).
+
+**Phase 6 — on-demand features (what changed from v1, and what was validated):**
+
+- **Scope, decided explicitly by the user when this phase started**: ported
+  cover letter, interview prep, company research, and resume improvement
+  from v1's `features/`. ATS score (a deterministic, non-LLM keyword/section
+  scorer in v1) and career path were dropped, not ported. Two features were
+  added in their place instead: referral outreach message drafting (pairs
+  with Phase 4's referral-contact search, which only ever surfaced names —
+  never drafted anything to send) and salary negotiation prep (pairs with
+  Phase 4's automatic salary enrichment, reusing the `salary_benchmark`
+  already stored on the job rather than searching again).
+- Every feature uses `.with_structured_output()` against its own schema
+  (`llm_tasks/schemas.py`), not v1's per-module `json.loads` +
+  regex-fence-stripping — removes a whole class of v1 silent-failure (a
+  malformed response quietly degrading to an empty/placeholder result
+  instead of a clear error).
+- One shared entry point, `feature_service.run_feature()` — every route in
+  `main.py` goes through it, so caching/resume-resolution can't be
+  accidentally bypassed by a future call site. Resume context always comes
+  from the job's own pipeline (FR-1A.8, no separate "which resume" choice);
+  `company_research` is the one feature that doesn't need a resume at all,
+  since it's about the employer/role, not candidate fit.
+- **A real bug found live, the same root cause as three Phase 3/4 schema
+  bugs before it**: `interview_prep`'s 12-question structured output is
+  comparably large to a batch-extraction response, not a normal
+  single-feature call — under the default token budget, Mistral Large
+  truncated mid-item (a 9th question left with only its `category` field
+  populated), which crashed the whole request with an uncaught Pydantic
+  validation error. Fixed two ways: a dedicated
+  `llm_interview_prep_max_tokens` setting (same pattern as
+  `llm_batch_extract_max_tokens` from Phase 3), and a defensive
+  `field_validator` that drops any malformed question item rather than
+  raising — "the LLM proposes, the system decides," now extended to
+  "...and discards what it botched," so one bad item can't take down 11 good
+  ones. Verified live: a second attempt against the same job returned all
+  12 well-formed, JD-specific questions.
+- **Verified live against real Bedrock, end to end, for all 6 features**,
+  against a real job/resume pair: `cover_letter` (confident tone,
+  referencing the job's actual required skills and the resume's stated
+  background), `company_research` (correctly flagged a deliberately sparse
+  test JD as a red flag rather than inventing detail), `resume_improvement`,
+  `referral_message` (personalized to a named contact), and
+  `negotiation_prep` (grounded its talking points and target-ask range in
+  the job's actual stored `salary_benchmark`, not a generic figure).
+- **Cache verified live, not just in the mocked test suite**: the identical
+  `cover_letter` request twice in a row returned `"cached": false` then
+  `"cached": true` with byte-identical output; a different `tone` value
+  produced a genuine second LLM call (FR-6.3 — params are part of the cache
+  key, not just job/resume/feature).
+- Error paths verified live: an unknown feature name and a nonexistent
+  `job_id` both return HTTP 404; requesting a resume-requiring feature for a
+  job whose pipeline had no resume bound (FR-2.6 extract-only mode) returns
+  HTTP 422 with a clear message, while `company_research` on that same job
+  succeeds normally.
+- 80 tests pass — 64 from before Phase 6, plus 16 new (7 mocked-LLM unit
+  tests, one per feature call, plus 2 for the `interview_prep` truncation
+  fix, in `test_feature_llm_tasks.py`; 7 integration tests against real
+  Postgres in `test_feature_service.py` covering cache hit/miss,
+  `regenerate`, the resume-required error, and `company_research`'s
+  no-resume path).
 
 **Lessons from live testing** (things a fixture can't catch, since they
 involve LinkedIn's real async client-side rendering):
@@ -312,3 +412,51 @@ curl "http://localhost:8000/debug/referral-contacts?company=Zscaler&job_title=Da
 Neither of these touches LinkedIn — both are web search (`ddgs`) + one
 Bedrock call, so there's no rate-limit risk to the LinkedIn session from
 testing these as much as you want.
+
+## On-demand features (Phase 6)
+
+One real (non-debug) endpoint for all 6 features — synchronous, cached per
+(job, resume, feature, params):
+
+```bash
+curl -X POST "http://localhost:8000/features/cover_letter/<a job id from /debug/jobs>" \
+  -H "Content-Type: application/json" -d '{"tone": "confident"}'
+
+curl -X POST "http://localhost:8000/features/company_research/<job id>" -d '{}'   # no resume needed
+curl -X POST "http://localhost:8000/features/interview_prep/<job id>" -d '{}'
+curl -X POST "http://localhost:8000/features/resume_improvement/<job id>" -d '{}'
+
+curl -X POST "http://localhost:8000/features/referral_message/<job id>" \
+  -d '{"contact_name": "Jane Doe", "contact_title": "Senior AI Engineer"}'
+
+curl -X POST "http://localhost:8000/features/negotiation_prep/<job id>" -d '{}'
+```
+
+Response shape: `{"feature", "job_id", "params", "cached", "result"}` —
+`cached: true` means it was served from the `feature_results` table without
+a new LLM call; pass `{"regenerate": true}` in the body to force a fresh
+one. `job_id` must belong to a resume-bound pipeline for every feature
+except `company_research` — otherwise the request fails with HTTP 422
+(FR-2.6 extract-only pipelines have no resume to work from).
+
+None of these touch LinkedIn — `cover_letter`/`interview_prep`/
+`resume_improvement`/`negotiation_prep` use only what's already in Postgres
+(the job's extracted fields + the resume's cached profile + `salary_benchmark`
+for negotiation_prep), and `referral_message` just drafts text, it doesn't
+search for the contact itself (`/debug/referral-contacts` does that).
+
+## Changing the active LLM model (Phase 5)
+
+```bash
+curl http://localhost:8000/settings/llm
+# {"provider":"bedrock","model":"mistral.mistral-large-3-675b-instruct","temperature":0.1,"max_tokens":2000}
+
+curl -X PUT http://localhost:8000/settings/llm \
+  -H "Content-Type: application/json" \
+  -d '{"provider":"bedrock","model":"anthropic.claude-3-haiku-20240307-v1:0","temperature":0.1,"max_tokens":2000}'
+```
+
+Takes effect immediately, no restart — the next scrape run's extraction and
+the next on-demand feature call both use the new model. `model` must be a
+Bedrock model id your AWS account actually has Marketplace access to (see
+the Phase 5 note above for what an access-denied model looks like).

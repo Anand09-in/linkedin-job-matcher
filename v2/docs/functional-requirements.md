@@ -60,9 +60,9 @@ v1 scrapes first, stores raw jobs, then runs a separate LangGraph pipeline (JD p
 - FR-5.4: Salary tasks MUST be retryable and idempotent (safe to run twice for the same job).
 
 ### FR-6 — On-demand features (per job, on click)
-- FR-6.1: The following features remain, triggered per-job, on user action, using the single active LLM (carried over from v1's `features/`): cover letter generation, ATS score, interview prep, company research, company/salary intel, resume improvement suggestions, career path.
+- FR-6.1: The following features are triggered per-job, on user action, using the single active LLM: cover letter generation, interview prep, company research, resume improvement suggestions (carried over from v1's `features/`), plus referral outreach message drafting and salary negotiation prep (added when this phase was scoped — the former pairs with FR-6's existing referral-contact search, FR-1A.8-style, the latter reuses the salary benchmark FR-5 already computes per job). ATS score (a deterministic, non-LLM scorer) and career path were explicitly dropped, not carried over — a deliberate scope decision, not an oversight.
 - FR-6.2: Each feature call MUST be synchronous from the UI's perspective (button click → loading state → result), consistent with today's UX — no polling/queue needed for these (they're single, user-initiated, one-off calls).
-- FR-6.3: Feature results SHOULD be cached per (job, resume, feature) so re-opening a previously generated result doesn't re-call the LLM, unless the user explicitly regenerates.
+- FR-6.3: Feature results SHOULD be cached per (job, resume, feature, and any feature-specific params like a cover letter's tone or a referral message's addressee — two different params values are two different cache entries) so re-opening a previously generated result doesn't re-call the LLM, unless the user explicitly regenerates.
 
 ### FR-7 — Application tracking
 - FR-7.1: Status tracking (new → saved → applied → interview → offer/rejected) and the tracker dashboard/stats are carried over unchanged in spirit from v1.
