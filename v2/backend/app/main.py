@@ -183,6 +183,8 @@ async def debug_list_jobs(pipeline_id: Optional[str] = None, limit: int = 20):
                 "match_rationale": j.match_rationale,
                 "date_posted": j.date_posted.isoformat() if j.date_posted else None,
                 "link": j.link,
+                "salary_benchmark": j.salary_benchmark,
+                "salary_enrichment_status": j.salary_enrichment_status,
             }
             for j in jobs
         ]
@@ -219,3 +221,45 @@ async def debug_list_scrape_runs(pipeline_id: str, limit: int = 10):
             }
             for r in runs
         ]
+
+
+# ── Phase 4: salary enrichment (automatic) + referral contacts (on-demand) ──
+
+@app.post("/debug/trigger-salary-lookup", include_in_schema=False)
+async def trigger_salary_lookup(job_id: str):
+    """Manually enqueue salary_lookup_task for one job — in production this
+    is enqueued automatically by scrape_service.py right after the job is
+    saved (FR-5.1); this exists only to test/re-run it without a full scrape."""
+    job = await app.state.redis.enqueue_job("salary_lookup_task", job_id)
+    return {"enqueued": True, "job_id": job.job_id}
+
+
+@app.get("/debug/referral-contacts", include_in_schema=False)
+async def debug_referral_contacts(
+    company: Optional[str] = None,
+    job_title: Optional[str] = None,
+    job_id: Optional[str] = None,
+):
+    """
+    On-demand, synchronous (FR-6.2-style) referral-contact search — web
+    search only, never LinkedIn scraping (see referral_service.py's module
+    docstring for why). Pass either job_id (looks up company/title from a
+    real Job row) or company+job_title directly (useful for testing without
+    a real scraped job).
+    """
+    from app.core.llm import get_llm
+    from app.services.referral_service import find_referral_contacts
+
+    if job_id:
+        async with AsyncSessionLocal() as session:
+            repo = Repository(session)
+            job = await repo.get_job(uuid.UUID(job_id))
+            if job is None:
+                return {"error": f"Job {job_id} not found"}
+            company, job_title = job.company, job.title
+
+    if not company or not job_title:
+        return {"error": "Provide either job_id, or both company and job_title"}
+
+    result = await find_referral_contacts(company, job_title, get_llm())
+    return result.model_dump()

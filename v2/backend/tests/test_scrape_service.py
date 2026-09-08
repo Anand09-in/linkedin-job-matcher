@@ -52,6 +52,18 @@ def _patch_llm():
     return patch("app.services.scrape_service.get_llm", return_value=object())
 
 
+class _FakeArqRedis:
+    """Records enqueue_job calls instead of touching real Redis — used to
+    verify salary_lookup_task gets enqueued after each save (FR-5.1)
+    without needing a real arq worker/Redis connection in these tests."""
+
+    def __init__(self):
+        self.enqueued: list[tuple] = []
+
+    async def enqueue_job(self, task_name: str, *args):
+        self.enqueued.append((task_name, *args))
+
+
 def _fake_profile_for(raw_text: str) -> ResumeProfile:
     """Deterministic, traceable-back-to-source fake profile — lets tests
     assert which resume's text actually reached the parse step without
@@ -335,3 +347,47 @@ async def test_extract_only_mode_saves_all_jobs_unscored(repo):
     saved = await repo.list_jobs(pipeline_id=pipeline.id)
     assert all(j.match_score is None for j in saved)
     assert all(j.scored_with_resume_id is None for j in saved)
+
+
+async def test_salary_lookup_enqueued_for_every_saved_job_not_rejected_ones(repo):
+    """Phase 4 (FR-5.1): every job that actually gets SAVED triggers a
+    fire-and-forget salary_lookup_task — rejected jobs never do, since they
+    never become a Job row to enrich."""
+    resume = await _make_resume(repo)
+    pipeline = await _make_pipeline(repo, resume, min_match_score_override=0.5)
+    jobs = [_raw_job("pass"), _raw_job("fail")]
+    analysis = BatchJobAnalysis(
+        results=[
+            JobAnalysisResult(job_index=0, match_score=0.9),  # passes -> saved
+            JobAnalysisResult(job_index=1, match_score=0.1),  # rejected -> no Job row
+        ]
+    )
+    fake_redis = _FakeArqRedis()
+
+    with _patch_scraper([jobs]), _patch_llm(), _patch_parse_resume(), \
+         patch("app.services.scrape_service.analyze_batch", AsyncMock(return_value=analysis)):
+        await run_scrape_pipeline(repo, pipeline, arq_redis=fake_redis)
+
+    assert len(fake_redis.enqueued) == 1
+    task_name, job_id = fake_redis.enqueued[0]
+    assert task_name == "salary_lookup_task"
+
+    saved = await repo.list_jobs(pipeline_id=pipeline.id)
+    assert len(saved) == 1
+    assert job_id == str(saved[0].id)
+
+
+async def test_no_salary_lookup_enqueued_when_arq_redis_not_provided(repo):
+    """arq_redis is optional — callers/tests that don't care about salary
+    enrichment (like every other test in this file) shouldn't need to fake
+    a redis pool just to run a scrape."""
+    resume = await _make_resume(repo)
+    pipeline = await _make_pipeline(repo, resume)
+    jobs = [_raw_job("a")]
+    analysis = BatchJobAnalysis(results=[JobAnalysisResult(job_index=0, match_score=0.9)])
+
+    with _patch_scraper([jobs]), _patch_llm(), _patch_parse_resume(), \
+         patch("app.services.scrape_service.analyze_batch", AsyncMock(return_value=analysis)):
+        result = await run_scrape_pipeline(repo, pipeline)  # no arq_redis passed
+
+    assert result["jobs_saved"] == 1  # completes normally, no error

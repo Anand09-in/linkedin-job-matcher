@@ -110,3 +110,67 @@ def build_batch_prompt(jobs: list[RawJob], resume_profile: ResumeProfile | None)
     ]
 
     return profile_section + "\n" + "\n".join(job_sections)
+
+
+# ── Salary synthesis (FR-5) ───────────────────────────────────────────────────
+
+SALARY_SYNTHESIS_SYSTEM_PROMPT = """You are a compensation research analyst.
+
+You will be given a job (title, company, location, seniority/experience
+level) and a set of web search result snippets about salaries for similar
+roles. Synthesize them into a salary estimate — each field's own description
+tells you exactly what belongs in it.
+
+Base your estimate ONLY on what the search results actually say. If the
+results are sparse, off-topic, or don't mention real figures, say so plainly
+in source_note and set confidence to "low" and the amounts to null — do not
+invent a plausible-sounding number with no basis in the results. Location
+and seniority matter: a figure for a different city or a clearly different
+seniority level than the job in question is weak evidence, not a
+direct answer — reflect that in confidence, not by silently ignoring it.
+"""
+
+
+def build_salary_synthesis_prompt(
+    job_title: str, company: str, location: str | None, experience_years_min: int | None, search_results_text: str
+) -> str:
+    return (
+        f"JOB: {job_title} at {company}\n"
+        f"Location: {location or 'unknown'}\n"
+        f"Experience level: {experience_years_min if experience_years_min is not None else 'unknown'} years minimum\n\n"
+        f"SEARCH RESULTS:\n{search_results_text or '(no results found)'}\n"
+    )
+
+
+# ── Referral contact search (on-demand, web-search-only — see
+#    referral_service.py's module docstring for why this is NOT a LinkedIn
+#    scrape) ────────────────────────────────────────────────────────────────
+
+REFERRAL_SYNTHESIS_SYSTEM_PROMPT = """You are helping a job seeker find people
+to ask for a referral at a specific company.
+
+You will be given a target company/role and a set of public web search
+result snippets (from searching for public LinkedIn profiles and similar
+public pages). Extract real people who plausibly work or worked at that
+company from these snippets — each field's own description tells you what
+belongs in it.
+
+Rules:
+- Only include people who are ACTUALLY named in the search results, with
+  a real profile URL from the results — never invent a plausible-sounding
+  name or guess someone might exist. If no real people are found in the
+  results, return an empty contacts list — do not fabricate to look useful.
+- Prefer results that look like current employees (title mentions the
+  company, or the result is clearly a profile page for that company) over
+  ambiguous ones.
+- This is a snapshot from a public search, not a live lookup — always
+  reflect that these could be outdated in the caveat field.
+"""
+
+
+def build_referral_synthesis_prompt(company: str, job_title: str, search_results_text: str) -> str:
+    return (
+        f"TARGET COMPANY: {company}\n"
+        f"ROLE OF INTEREST: {job_title}\n\n"
+        f"SEARCH RESULTS:\n{search_results_text or '(no results found)'}\n"
+    )

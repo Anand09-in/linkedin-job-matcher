@@ -148,3 +148,93 @@ class ResumeProfile(BaseModel):
         if isinstance(value, list) and len(value) > _MAX_PROFILE_SKILLS:
             return value[:_MAX_PROFILE_SKILLS]
         return value
+
+
+class SalaryBenchmark(BaseModel):
+    """
+    LLM synthesis of web-search results into a salary estimate (FR-5) — NOT
+    LinkedIn data. Location- and experience-aware by construction: the
+    search query salary_service.py builds includes the job's location and
+    experience level, not just its title, since pay varies materially by
+    both (a real usage concern raised directly — a generic national-average
+    figure isn't useful for comparison).
+
+    Confirmed live: `currency` defaulting to "USD" and `source_note`
+    defaulting to "" caused the model to leave both at their defaults even
+    for an India-based search that should have inferred "INR" — the same
+    lesson as ResumeProfile (see that class's docstring): a Pydantic default
+    becomes a `"default"` key in the JSON schema sent to the model, which
+    reads as "this is fine unless told otherwise," not "figure this out."
+    Fields that must always be actively reasoned about have NO default here;
+    only min_amount/max_amount keep one, since "no figure found" is a
+    genuinely valid state for the search to have found nothing.
+    """
+
+    source_note: str = Field(
+        ...,
+        description=(
+            "REQUIRED, never empty. One sentence on what informed this estimate — which kind of "
+            "sources the search results came from (e.g. 'based on Glassdoor/AmbitionBox listings for "
+            "similar roles in Bangalore'). If confidence is low, say plainly why (e.g. 'search results "
+            "were sparse/off-topic, this is a rough estimate' or 'no relevant figures were found')."
+        ),
+    )
+    confidence: str = Field(
+        ...,
+        description="REQUIRED: 'low', 'medium', or 'high' — how reliable this estimate is given the actual search results found, not a generic hedge.",
+    )
+    currency: str = Field(
+        ...,
+        description=(
+            "REQUIRED: the currency actually used where this job is located, inferred from the job's "
+            "location — e.g. 'INR' for a job in India, 'USD' for the United States, 'EUR' for the "
+            "Eurozone. Do NOT default to USD for a non-US location."
+        ),
+    )
+    period: str = Field("annual", description="'annual' or 'monthly'.")
+    min_amount: Optional[float] = Field(
+        None,
+        description=(
+            "Lower end of the estimated range, or null if no usable figure was found. If you found "
+            "only ONE figure (not a range), set both min_amount and max_amount to that same figure — "
+            "don't leave one of them null while the other has a value."
+        ),
+    )
+    max_amount: Optional[float] = Field(
+        None,
+        description="Upper end of the estimated range, or null if no usable figure was found — see min_amount's description for the single-figure case.",
+    )
+
+
+class ReferralContact(BaseModel):
+    """One candidate contact surfaced by a PUBLIC web search — never a
+    LinkedIn scrape (see referral_service.py's module docstring for why).
+    Surfacing only: nothing here initiates any outreach."""
+
+    note: Optional[str] = Field(
+        None,
+        description="Why this person looks relevant, e.g. 'Software Engineer at Acme Corp, found via public search' — and any staleness caveat.",
+    )
+    name: str = Field(..., description="The person's name as it appears in the search result.")
+    title: Optional[str] = Field(None, description="Their job title/role, if stated in the result.")
+    profile_url: Optional[str] = Field(None, description="Their public LinkedIn profile URL, if the result was one.")
+
+
+class ReferralSearchResult(BaseModel):
+    caveat: str = Field(
+        "",
+        description=(
+            "A short disclaimer on data freshness/accuracy: these come from public web search "
+            "snippets, not a live LinkedIn lookup, so employment status may be outdated — always "
+            "verify on their actual profile before reaching out."
+        ),
+    )
+    contacts: list[ReferralContact] = Field(default_factory=list, max_length=10)
+
+    @field_validator("contacts", mode="before")
+    @classmethod
+    def _cap_contacts_length(cls, value):
+        """Same defensive backstop as the other list fields in this module."""
+        if isinstance(value, list) and len(value) > 10:
+            return value[:10]
+        return value

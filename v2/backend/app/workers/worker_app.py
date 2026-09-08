@@ -15,7 +15,7 @@ from loguru import logger
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.scrapers.bootstrap import bootstrap as bootstrap_scrapers
-from app.workers.tasks import ping_task, run_scrape_task
+from app.workers.tasks import ping_task, run_scrape_task, salary_lookup_task
 
 settings = get_settings()
 
@@ -31,7 +31,7 @@ async def on_shutdown(ctx):
 
 
 class WorkerSettings:
-    functions = [ping_task, run_scrape_task]
+    functions = [ping_task, run_scrape_task, salary_lookup_task]
     on_startup = on_startup
     on_shutdown = on_shutdown
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
@@ -40,5 +40,9 @@ class WorkerSettings:
     # timeout for anything but a tiny `limit` — 30 minutes covers a
     # realistic full-size run without masking a genuinely hung job forever.
     job_timeout = 1800
-    # Phase 4 adds: salary_lookup_task, and cron jobs here for pipelines with
-    # a schedule_cron set (system-design.md, architecture.md §3.2).
+    # salary_lookup_task jobs (web search + one LLM call) run concurrently
+    # with each other and with any in-progress scrape run — arq's default
+    # max_jobs already allows this; nothing extra needed here for FR-5.1's
+    # "fire and forget, non-blocking."
+    # A future cron entry for pipelines with schedule_cron set goes here too
+    # (system-design.md, architecture.md §3.2).

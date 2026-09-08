@@ -24,6 +24,9 @@ python-dotenv==1.2.2
 loguru==0.7.3
 httpx==0.28.1
 
+# ── Web search (Phase 4: salary enrichment, referral-contact search) ────────
+ddgs==9.14.4
+
 # ── Testing (Phase 1: repository integration tests against real Postgres) ────
 pytest==8.3.4
 pytest-asyncio==0.25.2

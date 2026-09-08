@@ -191,6 +191,18 @@ class Repository:
         so a future scrape of the same link doesn't resurface it silently."""
         return await self.update_job_status(job_id, "deleted")
 
+    async def update_job_salary_benchmark(self, job_id: uuid.UUID, benchmark: dict, status: str = "done") -> None:
+        """FR-5: called by salary_lookup_task once enrichment completes (or
+        fails — status="failed" — see that task). Never touches match_score/
+        status/anything else about the job, so a slow or failed salary
+        lookup can't affect the job's visibility or filter outcome."""
+        await self._s.execute(
+            update(Job)
+            .where(Job.id == job_id)
+            .values(salary_benchmark=benchmark, salary_enrichment_status=status, updated_at=datetime.now(timezone.utc))
+        )
+        await self._s.commit()
+
     async def list_jobs(
         self,
         min_score: Optional[float] = None,

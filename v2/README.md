@@ -5,16 +5,24 @@ plan, and the other docs it links to ([functional-requirements.md](docs/function
 [architecture.md](docs/architecture.md), [system-design.md](docs/system-design.md),
 [flow-diagrams.md](docs/flow-diagrams.md)) for the full design.
 
-**Status:** Phase 3 (Batch extraction, deterministic filter, and save)
-complete. The core single-step pipeline now runs for real: scrape -> one
-structured-output Bedrock call per batch (extraction + match assessment) ->
-deterministic threshold filter -> save as a real `Job` row (or a lightweight
-`RejectedJob` audit row if it doesn't pass). No separate "run matching" step
-exists — `services/scrape_service.py` is the whole thing. Job
-scraping/matching still lives in the v1 code at the repo root until cutover.
+**Status:** Phase 4 (Parallel salary enrichment) complete, plus an extra
+feature: on-demand referral-contact search. Every job saved by Phase 3's
+pipeline now automatically triggers `salary_lookup_task` (web search + one
+LLM call, fire-and-forget — never blocks scraping or affects a job's match
+score/visibility if it fails). Referral-contact search is separate and
+on-demand only — see the design-decision note below for why.
+
+Phase 3 (Batch extraction, deterministic filter, and save) is complete: the
+core single-step pipeline runs for real — scrape -> one structured-output
+Bedrock call per batch (extraction + match assessment) -> deterministic
+threshold filter -> save as a real `Job` row (or a lightweight `RejectedJob`
+audit row if it doesn't pass). No separate "run matching" step exists —
+`services/scrape_service.py` is the whole thing.
 
 Phase 2 (Universal scraper framework) is complete and was validated against
 real, live LinkedIn — see the "Lessons from live testing" section below.
+
+Job scraping/matching still lives in the v1 code at the repo root until cutover.
 
 LLM support is Bedrock-only by explicit decision (no Anthropic-direct/OpenAI/
 Groq/Gemini/Ollama) — `core/llm.py` and `requirements.txt` were trimmed
@@ -97,6 +105,52 @@ a silent fallback to unfiltered mode. Locked in with `test_resume_profile_is_par
   ML resume → `current_title: "AI/ML Engineer"`, both correctly overriding
   the shared "SDE" work-history title, both with accurate 1.5-year
   experience and well-curated skill lists.
+
+**Phase 4 — salary enrichment + referral-contact search (design decisions and what was validated):**
+
+- **Design decision on referral search, made explicitly with the user before
+  building anything**: two structurally different features were considered —
+  scraping LinkedIn's own People Search (richer data, but real automated
+  scraping of member data, which LinkedIn's ToS treats far more seriously
+  than job listings, and which would compound the rate-limiting risk already
+  observed in Phase 2) vs. public web search for `site:linkedin.com/in`
+  results (no li_at cookie, no LinkedIn automation at all, lower risk).
+  Chosen: **web search only**. Also decided: **on-demand per job** (like
+  cover letter/interview prep will be), not automatic for every saved job
+  like salary — far lower request volume, and the user is unlikely to want
+  referral contacts for every job a scrape run saves. `services/
+  referral_service.py`'s module docstring records both decisions and why.
+  Scope is explicitly surfacing-only — names/titles/profile links for the
+  user to reach out to themselves; nothing here initiates any outreach.
+- `services/web_search.py` — a shared DuckDuckGo (`ddgs`) wrapper used by
+  both salary (automatic) and referral search (on-demand); fails soft
+  (empty results, not an exception) since an external search dependency
+  should never be able to take down either feature.
+- Salary search is location- AND experience-aware by construction (a real
+  usage concern raised directly): the query includes the job's location and
+  experience level, not just its title, since a generic national-average
+  figure isn't useful for comparison.
+- **A third real schema bug from the same root cause, found via real
+  Bedrock**: `SalaryBenchmark.currency` defaulted to `"USD"` and stayed
+  there even for a Bangalore, India search — and `source_note` stayed empty
+  despite an explicit prompt instruction to always explain the estimate.
+  Same lesson as the two ResumeProfile bugs: a Pydantic field default
+  becomes a `"default"` key in the JSON schema handed to the model, which
+  reads as "this is fine unless told otherwise." Fixed by removing the
+  defaults on `currency`/`confidence`/`source_note` (making them required)
+  — verified live: a Bangalore search now correctly returns `currency:
+  "INR"` with an honest "no direct 2-year figure found, confidence: low,
+  amounts: null" rather than a wrong number; a US search for the same role
+  returns `currency: "USD"` with a concrete, cited $160k-$180k range at
+  `confidence: "medium"`.
+- Referral search verified live against a real company (Zscaler): returned
+  real named people with real profile URLs and relevance notes (e.g. "Senior
+  Machine Learning Engineer at Zscaler, overlaps with data engineering"),
+  correctly returning fewer/no results rather than fabricating contacts when
+  the search didn't surface strong matches.
+- `salary_lookup_task` is idempotent (safe to run twice) and a failure only
+  marks `salary_enrichment_status="failed"` — it never touches a job's
+  `match_score` or visibility (FR-5.3), verified with dedicated tests.
 
 **Lessons from live testing** (things a fixture can't catch, since they
 involve LinkedIn's real async client-side rendering):
@@ -236,3 +290,25 @@ curl "http://localhost:8000/debug/rejected-jobs?pipeline_id=<id from step 2>" # 
 test FR-2.6's extract-only mode (every job saved, none filtered, all
 unscored). Without `LI_AT_COOKIE` set, step 3 fails fast and cleanly with
 `LI_AT_COOKIE is not set` rather than hanging.
+
+## Testing salary enrichment + referral search (Phase 4)
+
+Salary enrichment happens automatically — every job saved by step 3 above
+already triggered `salary_lookup_task`; check the result via `/debug/jobs`
+(now includes `salary_benchmark`/`salary_enrichment_status`) or re-run it
+manually for one job:
+
+```bash
+curl -X POST "http://localhost:8000/debug/trigger-salary-lookup?job_id=<a job id from /debug/jobs>"
+```
+
+Referral-contact search is on-demand and synchronous — no job needed, works
+with just a company/title (or pass `job_id` to look those up from a real job):
+
+```bash
+curl "http://localhost:8000/debug/referral-contacts?company=Zscaler&job_title=Data+Engineer"
+```
+
+Neither of these touches LinkedIn — both are web search (`ddgs`) + one
+Bedrock call, so there's no rate-limit risk to the LinkedIn session from
+testing these as much as you want.

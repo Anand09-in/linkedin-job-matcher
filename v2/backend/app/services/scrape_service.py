@@ -112,7 +112,9 @@ def _job_row(raw_job: RawJob, result: JobAnalysisResult, pipeline: Pipeline, run
     }
 
 
-async def run_scrape_pipeline(repo: Repository, pipeline: Pipeline, limit: Optional[int] = None) -> dict:
+async def run_scrape_pipeline(
+    repo: Repository, pipeline: Pipeline, limit: Optional[int] = None, arq_redis=None
+) -> dict:
     """
     Run one pipeline's scrape end to end. Returns a summary dict — the same
     shape a future GET /scrape/{run_id} (Phase 7) would report.
@@ -127,6 +129,11 @@ async def run_scrape_pipeline(repo: Repository, pipeline: Pipeline, limit: Optio
     test runs against real LinkedIn without pulling the full default every
     time (Phase 2 testing showed LinkedIn throttling after repeated
     rapid-fire full-size runs on one session).
+
+    `arq_redis` (an arq ArqRedis pool — the worker's own `ctx['redis']`) is
+    used to enqueue salary_lookup_task immediately after each job is saved
+    (FR-5.1: fire-and-forget, non-blocking). Optional so tests/callers that
+    don't care about salary enrichment don't need to fake a redis pool.
     """
     resume = await repo.get_resume(pipeline.resume_id) if pipeline.resume_id else None
 
@@ -224,10 +231,19 @@ async def run_scrape_pipeline(repo: Repository, pipeline: Pipeline, limit: Optio
                     )
                     continue
 
-                await repo.upsert_job(
+                saved_job, _ = await repo.upsert_job(
                     _job_row(raw_job, result, pipeline, run.id, resume.id if resume else None)
                 )
                 jobs_saved += 1
+
+                if arq_redis is not None:
+                    # Fire-and-forget (FR-5.1) — a failure to even enqueue
+                    # (e.g. Redis hiccup) must not fail the save that already
+                    # committed; log and move on rather than raising here.
+                    try:
+                        await arq_redis.enqueue_job("salary_lookup_task", str(saved_job.id))
+                    except Exception as e:
+                        logger.warning(f"[scrape_service] failed to enqueue salary lookup for {saved_job.id}: {e}")
 
             await repo.update_scrape_run(
                 run.id, jobs_seen=jobs_seen, jobs_saved=jobs_saved, jobs_rejected=jobs_rejected
