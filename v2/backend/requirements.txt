@@ -1,6 +1,14 @@
 # ── API ───────────────────────────────────────────────────────────────────────
 fastapi==0.136.3
 uvicorn[standard]==0.48.0
+python-multipart==0.0.29
+
+# ── Resume upload (Phase 7: POST /resumes accepts a PDF, not raw_text) ───────
+pymupdf==1.27.2.3
+pdfplumber==0.11.9
+
+# ── Export (Phase 7: GET /export/excel) ──────────────────────────────────────
+openpyxl==3.1.5
 
 # ── Database ──────────────────────────────────────────────────────────────────
 sqlalchemy==2.0.50

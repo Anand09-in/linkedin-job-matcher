@@ -5,7 +5,16 @@ plan, and the other docs it links to ([functional-requirements.md](docs/function
 [architecture.md](docs/architecture.md), [system-design.md](docs/system-design.md),
 [flow-diagrams.md](docs/flow-diagrams.md)) for the full design.
 
-**Status:** Phase 6 (On-demand features) complete: cover letter, interview
+**Status:** Phase 7 (API surface completion) complete — the real, documented
+REST API the frontend (Phase 8) will build against: `app/api/routes/`
+(`jobs`, `scrape`, `resumes`, `pipelines`, `settings`, `features`, `export`),
+`app/api/models.py` (a proper Pydantic response model for every endpoint —
+no bare `dict` returns), and `app/api/dependencies.py` (`get_repo`).
+`main.py` is now a pure composition root; every `/debug/*` prototyping
+endpoint from Phases 0-6 is gone, replaced by its real equivalent — real PDF
+resume upload (`POST /resumes`, pymupdf/pdfplumber) and real pipeline CRUD
+(`POST/GET/PUT/DELETE /pipelines`) included. See the Phase 7 section below
+for what was validated. Phase 6 (On-demand features) complete: cover letter, interview
 prep, company research, resume improvement, referral outreach message
 drafting, and salary negotiation prep — all via one shared `POST
 /features/{feature}/{job_id}`, one LLM call each, cached per (job, resume,
@@ -252,6 +261,65 @@ a silent fallback to unfiltered mode. Locked in with `test_resume_profile_is_par
   `regenerate`, the resume-required error, and `company_research`'s
   no-resume path).
 
+**Phase 7 — API surface completion (what changed, and what was validated):**
+
+- `main.py` shrank to a pure composition root (lifespan + `include_router()`
+  for 7 routers) — every `/debug/*` endpoint that had accumulated across
+  Phases 0-6 (`/debug/ping`, `/debug/quick-resume`, `/debug/quick-pipeline`,
+  `/debug/scrape`, `/debug/jobs`, `/debug/rejected-jobs`,
+  `/debug/scrape-runs`, `/debug/trigger-salary-lookup`,
+  `/debug/referral-contacts`) is gone, replaced by its real, documented,
+  response-modeled equivalent in `app/api/routes/`.
+- **A real gap this surfaced**: `/debug/referral-contacts` (Phase 4's actual
+  web search for candidate referral contacts) turned out to have no planned
+  real replacement at all in architecture.md §3.4 — only Phase 6's
+  `referral_message` (drafting outreach text to a contact you already have)
+  was on the books, a different feature entirely. Fixed by adding
+  `referral_search` as a 7th `/features/` feature (`feature_service.py`),
+  reusing Phase 4's `referral_service.py` unchanged.
+- `POST /resumes` is the real FR-1A.2 path: a PDF file in (multipart,
+  `python-multipart`), clean text out (pymupdf, falling back to pdfplumber
+  for the table-heavy/oddly-encoded PDFs pymupdf sometimes returns empty
+  text for — ported from v1's `parser/resume_parser.py`, the one part of v1
+  worth keeping as-is). `PUT /resumes/{id}` can rename, replace the file, or
+  both; replacing the file clears the cached `parsed_profile` so the next
+  pipeline run re-parses instead of scoring against stale text.
+- `POST/GET/PUT/DELETE /pipelines` is the real FR-1A.1 path, replacing
+  `/debug/quick-pipeline` — no more semicolon-separated `locations` query
+  param workaround, `locations` is a real JSON array in the request body now.
+- Every response is a proper Pydantic model (`app/api/models.py`, all with
+  `from_attributes=True` so a route does `JobResponse.model_validate(job)`
+  directly against the ORM row — no v1-style hand-written
+  `_job_to_response()` field-by-field mapper needed, since v2's ORM field
+  names already match what the API exposes 1:1). Reviewed `openapi.json` for
+  bare-`dict` leftovers per the plan's exit criteria: found and fixed one —
+  `GET /health` — everything else already had a real model from the phase
+  that introduced it.
+- **Verified live against the real running API** (not just the test suite):
+  a real resume PDF (`docs/resume/Anand_Kumar_Sahu_Resume_ML.pdf`) uploaded
+  via `curl -F` came back with the full, correctly extracted resume text in
+  one request; `openapi.json` fetched twice in a row byte-for-byte
+  identical, confirming the exit criterion (deterministic generation, no
+  codegen diff for unrelated endpoints on a re-fetch).
+- 96 tests pass — 80 from before Phase 7, plus 15 new integration tests in
+  `test_api_routes.py` exercising the actual HTTP layer end-to-end (via
+  `httpx.AsyncClient` + `ASGITransport` against the real FastAPI app, real
+  Postgres, a faked arq redis pool) — resume upload/rename/replace/delete
+  including the FR-1A.7 409-in-use case, pipeline CRUD, job detail/status/
+  soft-delete, scrape trigger + 404s, settings get/put, feature-route error
+  mapping, and both export formats — plus 1 more in `test_feature_service.py`
+  for the new `referral_search` feature (below).
+- **A real test-isolation gap caught while writing those tests**: routes
+  reached through `app/api/dependencies.py`'s `get_repo()` were easy to
+  point at the test database (patch that module's own `AsyncSessionLocal`
+  reference), but `core/llm.py`'s `_get_active_llm_setting()` does a fresh
+  `from app.domain.db import AsyncSessionLocal` INSIDE the function on every
+  call — a second, separate reference that the first patch doesn't reach.
+  Left unpatched, any test exercising `/features/*` would have silently
+  read/written the real dev database's `LLMSetting` row instead of the
+  test one. Fixed by patching both `app.api.dependencies.AsyncSessionLocal`
+  and `app.domain.db.AsyncSessionLocal` in the `api_client` test fixture.
+
 **Lessons from live testing** (things a fixture can't catch, since they
 involve LinkedIn's real async client-side rendering):
 - LinkedIn lazily hydrates job-card content as it scrolls into view — reading
@@ -297,22 +365,15 @@ Verify:
 ```bash
 curl http://localhost:8000/health
 # {"status":"ok","db":"ok","redis":"ok","version":"0.0.1"}
-
-curl -X POST http://localhost:8000/debug/ping
-# {"enqueued":true,"job_id":"..."}
-
-curl http://localhost:8000/debug/ping-log
-# [{"id":"...","message":"pong","created_at":"..."}]  <- proves worker -> redis -> postgres wiring
 ```
 
-Then open http://localhost:5173 — the placeholder page calls `/health` itself.
+Then open http://localhost:5173 — the placeholder page calls `/health`
+itself — or http://localhost:8000/docs for the full interactive API surface
+(Phase 7's `openapi.json`, auto-generated from `app/api/routes/`).
 
 If a port is already taken on your machine (a real problem hit during v1
 development — an unrelated project's Docker container was found squatting on
 port 8000), change `API_PORT`/`FRONTEND_PORT` in `.env` (FR-9.3).
-
-`/debug/ping` and `/debug/ping-log` are Phase 0 scaffolding only — they get
-removed once Phase 3 has a real scrape trigger to exercise the same wiring.
 
 ## Running the backend test suite (Phase 1+)
 
@@ -364,26 +425,26 @@ set, rebuild if you just changed `.env`
 then:
 
 ```bash
-# 1. Create a resume (Phase 7 will replace this with real PDF upload):
-curl -X POST http://localhost:8000/debug/quick-resume \
-  -H "Content-Type: application/json" \
-  -d '{"name": "My Resume", "raw_text": "..."}'
-# -> {"resume_id": "...", ...}
+# 1. Upload a resume — real multipart PDF upload (Phase 7):
+curl -X POST http://localhost:8000/resumes -F "name=My Resume" -F "file=@/path/to/resume.pdf"
+# -> {"id": "...", "raw_text": "...", ...}
 
-# 2. Create a pipeline bound to that resume (Phase 7 replaces with real POST /pipelines).
-#    `locations` is semicolon-separated (a single "City, Country" value already
-#    has a comma in it — see the Phase 2 lesson above):
-curl -X POST "http://localhost:8000/debug/quick-pipeline?name=Test&query=AI+Engineer&locations=Bangalore,+India&resume_id=<id from step 1>"
-# -> {"pipeline_id": "...", ...}
+# 2. Create a pipeline bound to that resume (Phase 7's real POST /pipelines —
+#    `locations` is a real JSON array now, no more semicolon workaround):
+curl -X POST http://localhost:8000/pipelines \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Test", "site": "linkedin", "query": "AI Engineer", "locations": ["Bangalore, India"], "resume_id": "<id from step 1>"}'
+# -> {"id": "...", ...}
 
 # 3. Trigger a real run. `limit` keeps it small for manual testing — go easy
 #    on LinkedIn's rate limits (see the lesson above):
-curl -X POST "http://localhost:8000/debug/scrape?pipeline_id=<id from step 2>&limit=5"
+curl -X POST http://localhost:8000/scrape \
+  -H "Content-Type: application/json" -d '{"pipeline_id": "<id from step 2>", "limit": 5}'
 
 # 4. Inspect what happened:
-curl "http://localhost:8000/debug/scrape-runs?pipeline_id=<id from step 2>"   # status + counters
-curl "http://localhost:8000/debug/jobs?pipeline_id=<id from step 2>"          # saved, scored jobs
-curl "http://localhost:8000/debug/rejected-jobs?pipeline_id=<id from step 2>" # filtered-out jobs + why
+curl "http://localhost:8000/scrape/runs?pipeline_id=<id from step 2>"            # status + counters
+curl "http://localhost:8000/jobs?pipeline_id=<id from step 2>"                   # saved, scored jobs
+curl "http://localhost:8000/pipelines/<id from step 2>/rejected-jobs"            # filtered-out jobs + why
 ```
 
 `docker compose logs worker` shows progress. Omit `resume_id` in step 2 to
@@ -394,37 +455,37 @@ unscored). Without `LI_AT_COOKIE` set, step 3 fails fast and cleanly with
 ## Testing salary enrichment + referral search (Phase 4)
 
 Salary enrichment happens automatically — every job saved by step 3 above
-already triggered `salary_lookup_task`; check the result via `/debug/jobs`
-(now includes `salary_benchmark`/`salary_enrichment_status`) or re-run it
-manually for one job:
+already triggered `salary_lookup_task`; check the result via `GET /jobs`
+(the response includes `salary_benchmark`/`salary_enrichment_status`). There
+is no manual re-trigger endpoint in the real API — architecture.md never
+planned one; a failed lookup is retried simply by re-running the job's
+pipeline.
+
+Referral-contact search is on-demand and synchronous, and — since Phase 7 —
+a real `/features/` feature like the rest of Phase 6 rather than a debug
+endpoint (see the section below):
 
 ```bash
-curl -X POST "http://localhost:8000/debug/trigger-salary-lookup?job_id=<a job id from /debug/jobs>"
+curl -X POST "http://localhost:8000/features/referral_search/<a job id from GET /jobs>" -d '{}'
 ```
 
-Referral-contact search is on-demand and synchronous — no job needed, works
-with just a company/title (or pass `job_id` to look those up from a real job):
+Neither this nor salary enrichment touches LinkedIn — both are web search
+(`ddgs`) + one Bedrock call, so there's no rate-limit risk to the LinkedIn
+session from testing these as much as you want.
+
+## On-demand features (Phase 6, +1 in Phase 7)
+
+One real endpoint for all 7 features — synchronous, cached per (job, resume,
+feature, params):
 
 ```bash
-curl "http://localhost:8000/debug/referral-contacts?company=Zscaler&job_title=Data+Engineer"
-```
-
-Neither of these touches LinkedIn — both are web search (`ddgs`) + one
-Bedrock call, so there's no rate-limit risk to the LinkedIn session from
-testing these as much as you want.
-
-## On-demand features (Phase 6)
-
-One real (non-debug) endpoint for all 6 features — synchronous, cached per
-(job, resume, feature, params):
-
-```bash
-curl -X POST "http://localhost:8000/features/cover_letter/<a job id from /debug/jobs>" \
+curl -X POST "http://localhost:8000/features/cover_letter/<a job id from GET /jobs>" \
   -H "Content-Type: application/json" -d '{"tone": "confident"}'
 
 curl -X POST "http://localhost:8000/features/company_research/<job id>" -d '{}'   # no resume needed
 curl -X POST "http://localhost:8000/features/interview_prep/<job id>" -d '{}'
 curl -X POST "http://localhost:8000/features/resume_improvement/<job id>" -d '{}'
+curl -X POST "http://localhost:8000/features/referral_search/<job id>" -d '{}'    # no resume needed
 
 curl -X POST "http://localhost:8000/features/referral_message/<job id>" \
   -d '{"contact_name": "Jane Doe", "contact_title": "Senior AI Engineer"}'
@@ -436,14 +497,15 @@ Response shape: `{"feature", "job_id", "params", "cached", "result"}` —
 `cached: true` means it was served from the `feature_results` table without
 a new LLM call; pass `{"regenerate": true}` in the body to force a fresh
 one. `job_id` must belong to a resume-bound pipeline for every feature
-except `company_research` — otherwise the request fails with HTTP 422
-(FR-2.6 extract-only pipelines have no resume to work from).
+except `company_research` and `referral_search` — otherwise the request
+fails with HTTP 422 (FR-2.6 extract-only pipelines have no resume to work
+from).
 
 None of these touch LinkedIn — `cover_letter`/`interview_prep`/
 `resume_improvement`/`negotiation_prep` use only what's already in Postgres
 (the job's extracted fields + the resume's cached profile + `salary_benchmark`
-for negotiation_prep), and `referral_message` just drafts text, it doesn't
-search for the contact itself (`/debug/referral-contacts` does that).
+for negotiation_prep); `referral_search`/`referral_message` are web search
+(`ddgs`) + one Bedrock call each, same as salary enrichment.
 
 ## Changing the active LLM model (Phase 5)
 

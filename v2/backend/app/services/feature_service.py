@@ -5,6 +5,9 @@ request: referral outreach message (pairs with Phase 4's referral_service.py,
 which only surfaces contacts, never drafts outreach) and negotiation prep
 (pairs with Phase 4's automatic salary_service.py enrichment, reusing the
 Job.salary_benchmark it already computed rather than searching again).
+A 7th, `referral_search`, was added in Phase 7 when retiring `/debug/*`
+endpoints surfaced that Phase 4's actual referral-contact search had no
+real, non-debug replacement — see `_run_referral_search`'s docstring.
 
 ATS scoring and career-path planning from v1's `features/` were deliberately
 NOT ported — dropped by explicit user decision when this phase was scoped,
@@ -41,6 +44,7 @@ from app.llm_tasks.negotiation_prep import prepare_negotiation
 from app.llm_tasks.referral_message import draft_referral_message
 from app.llm_tasks.resume_improvement import improve_resume
 from app.llm_tasks.schemas import JobContext, ResumeContext, ResumeProfile
+from app.services.referral_service import find_referral_contacts
 
 
 def _job_context(job: Job) -> JobContext:
@@ -111,6 +115,20 @@ async def _run_negotiation_prep(job: JobContext, resume: Optional[ResumeContext]
     return await prepare_negotiation(job, resume, llm)
 
 
+async def _run_referral_search(job: JobContext, resume: Optional[ResumeContext], llm: BaseChatModel, params: dict) -> BaseModel:
+    """The actual web search for candidate referral contacts (Phase 4's
+    referral_service.py — web-search-only, never LinkedIn scraping, see that
+    module's docstring). Distinct from `referral_message`, which drafts
+    outreach text to a contact you already have — this is how you find one
+    in the first place. Originally only reachable via Phase 4's
+    `/debug/referral-contacts`; promoted to a real feature here since Phase
+    7 retires every `/debug/*` endpoint and this one had no other real
+    replacement in architecture.md's planned surface — an oversight in how
+    Phase 6 was scoped, not a deliberate exclusion like ATS score/career
+    path were."""
+    return await find_referral_contacts(job.company, job.title, llm)
+
+
 FEATURES: dict[str, FeatureSpec] = {
     "cover_letter": FeatureSpec(
         needs_resume=True, default_params={"tone": "professional"}, run=_run_cover_letter
@@ -127,6 +145,7 @@ FEATURES: dict[str, FeatureSpec] = {
         run=_run_referral_message,
     ),
     "negotiation_prep": FeatureSpec(needs_resume=True, default_params={}, run=_run_negotiation_prep),
+    "referral_search": FeatureSpec(needs_resume=False, default_params={}, run=_run_referral_search),
 }
 
 

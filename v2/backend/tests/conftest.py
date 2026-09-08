@@ -108,3 +108,68 @@ async def repo(db_session):
     from app.domain.repository import Repository
 
     return Repository(db_session)
+
+
+class _SessionCtx:
+    """Wraps an already-open test session as an async context manager, so
+    `async with AsyncSessionLocal() as session:` inside app code under test
+    reuses the SAME session/transaction db_session is using — otherwise it
+    would open a second real connection bound to whatever DATABASE_URL
+    app.domain.db.engine was constructed with at first import (which can
+    happen before this session's env-var patch, if another test module
+    imports it transitively at collection time — see test_salary_lookup_task
+    for the same pattern). Used via `patch(..., return_value=_SessionCtx(...))`."""
+
+    def __init__(self, session):
+        self._session = session
+
+    async def __aenter__(self):
+        return self._session
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakeArqRedis:
+    """Records enqueue_job calls instead of touching real Redis — used as
+    `app.state.redis` in api_client so POST /scrape doesn't require (or
+    accidentally feed jobs to) the real arq worker process during tests."""
+
+    def __init__(self):
+        self.enqueued: list[tuple] = []
+
+    async def enqueue_job(self, task_name: str, *args):
+        self.enqueued.append((task_name, *args))
+        return type("FakeArqJob", (), {"job_id": "fake-job-id"})()
+
+    async def ping(self):
+        return True
+
+
+@pytest_asyncio.fixture
+async def api_client(db_session):
+    """An httpx.AsyncClient wired directly to the FastAPI app via ASGI
+    transport (no real network, no lifespan — app.state.redis is set
+    manually to the fake above instead of lifespan's real create_pool)."""
+    from unittest.mock import patch
+
+    import httpx
+
+    from app.main import app
+
+    app.state.redis = _FakeArqRedis()
+
+    # Two separate patches, not one: app.api.dependencies imports
+    # AsyncSessionLocal at ITS OWN module top level (bound once, at import
+    # time, into that module's namespace — patching app.domain.db later
+    # wouldn't reach it), while app.core.llm's _get_active_llm_setting()
+    # does `from app.domain.db import AsyncSessionLocal` freshly INSIDE the
+    # function on every call (a lazy import that re-reads whatever
+    # app.domain.db.AsyncSessionLocal currently is) — so routes that call
+    # get_llm() (features.py) need the second patch too, or they'd silently
+    # read/write the real dev database's LLMSetting row during a test.
+    with patch("app.api.dependencies.AsyncSessionLocal", return_value=_SessionCtx(db_session)), \
+         patch("app.domain.db.AsyncSessionLocal", return_value=_SessionCtx(db_session)):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            yield client

@@ -50,6 +50,31 @@ class Repository:
         await self._s.execute(update(Resume).where(Resume.id == resume_id).values(parsed_profile=profile))
         await self._s.commit()
 
+    async def update_resume(
+        self,
+        resume_id: uuid.UUID,
+        name: Optional[str] = None,
+        filename: Optional[str] = None,
+        raw_text: Optional[str] = None,
+    ) -> Optional[Resume]:
+        """Partial update for PUT /resumes/{id} (Phase 7) — a rename, or a
+        replaced file, or both. Replacing raw_text clears parsed_profile: a
+        cached ResumeProfile distilled from the OLD text would otherwise
+        keep being reused by every pipeline bound to this resume, silently
+        describing a candidate who no longer matches the uploaded PDF."""
+        fields: dict[str, Any] = {}
+        if name is not None:
+            fields["name"] = name
+        if filename is not None:
+            fields["filename"] = filename
+        if raw_text is not None:
+            fields["raw_text"] = raw_text
+            fields["parsed_profile"] = None
+        if fields:
+            await self._s.execute(update(Resume).where(Resume.id == resume_id).values(**fields))
+            await self._s.commit()
+        return await self.get_resume(resume_id)
+
     async def delete_resume(self, resume_id: uuid.UUID) -> bool:
         """FR-1A.7: refuse to delete a resume still bound to an ENABLED pipeline."""
         blocking = await self._s.execute(

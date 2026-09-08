@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.domain.exceptions import FeatureRequiresResumeError, UnknownFeatureError
-from app.llm_tasks.schemas import CompanyResearchResult, CoverLetterResult
+from app.llm_tasks.schemas import CompanyResearchResult, CoverLetterResult, ReferralSearchResult
 from app.services.feature_service import run_feature
 
 
@@ -97,6 +97,22 @@ async def test_company_research_works_without_a_resume(repo):
 
     assert result["cached"] is False
     assert result["result"]["overall_impression"] == "A mid-size data-focused company."
+
+
+async def test_referral_search_works_without_a_resume(repo):
+    """Phase 7 addition: referral_search (finding contacts) doesn't need a
+    resume either — it's about the job's company/title, same as
+    company_research."""
+    job = await _make_job(repo, resume_id=None)
+    fake_result = ReferralSearchResult(caveat="test", contacts=[])
+    fake_llm = object()
+
+    with patch("app.services.feature_service.find_referral_contacts", AsyncMock(return_value=fake_result)) as mock_call:
+        result = await run_feature(repo, "referral_search", job.id, {}, llm=fake_llm)
+
+    mock_call.assert_awaited_once_with("Acme", "Data Engineer", fake_llm)
+    assert result["cached"] is False
+    assert result["result"]["caveat"] == "test"
 
 
 async def test_unknown_feature_raises(repo):

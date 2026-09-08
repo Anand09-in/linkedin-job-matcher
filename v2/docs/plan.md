@@ -87,9 +87,12 @@ Each phase has a goal, deliverables, and exit criteria — a phase isn't "done" 
 ## Phase 7 — API surface completion
 **Goal:** everything the frontend will need exists and is documented via OpenAPI before frontend work starts, so codegen (Phase 8) has a real contract to work from.
 
-- Finalize `jobs`, `scrape`, `resume`, `settings`, `features` routers per architecture.md §3.4.
-- Export/CSV/Excel endpoints ported from v1.
-- OpenAPI schema reviewed for completeness — every response model has no bare `dict` returns left over from quick Phase 0–6 prototyping.
+- Finalize `jobs`, `scrape`, `resumes`, `pipelines`, `settings`, `features`, `export` routers under a real `app/api/routes/` package per architecture.md §3.4, with a shared `app/api/dependencies.py` (`get_repo`) and `app/api/models.py` (every request/response as a proper Pydantic model, `from_attributes=True` so a route can `model_validate()` an ORM row directly instead of hand-mapping fields).
+- `main.py` becomes a pure composition root (lifespan + `include_router()` × 7) — every `/debug/*` prototyping endpoint from Phases 0-6 is retired now that its real replacement exists; none carried forward. Retiring `/debug/referral-contacts` surfaced a real gap this way: Phase 4's referral-contact *search* (as opposed to Phase 6's referral-*message* drafting) had no planned real endpoint at all in architecture.md §3.4 — fixed by adding it as a 7th `/features/` feature (`referral_search`), reusing Phase 4's `referral_service.py` unchanged.
+- `POST /resumes` (multipart PDF upload) and `PUT /resumes/{id}` are the real FR-1A.2 path — PDF text extraction (pymupdf, falling back to pdfplumber) ported from v1's `parser/resume_parser.py`, replacing the raw-text-only `/debug/quick-resume` used to exercise Phases 1-6. Replacing a resume's file clears its cached `parsed_profile` so a later pipeline run re-parses instead of scoring against stale text.
+- `POST/GET/PUT/DELETE /pipelines` is the real FR-1A.1 path, replacing `/debug/quick-pipeline`; `GET /pipelines/{id}/rejected-jobs` surfaces FR-2.3's audit trail per pipeline.
+- Export/CSV/Excel endpoints ported from v1, adapted to v2's field set (`salary_benchmark` dict instead of v1's `salary_range` string, `experience_years_min` instead of v1's combined field, no v1 `insights` array).
+- OpenAPI schema reviewed for completeness — every response model has no bare `dict` returns left over from quick Phase 0–6 prototyping (`GET /health` was the one remaining case, fixed with a `HealthResponse` model).
 
 **Exit criteria:** `openapi.json` is stable enough that regenerating the frontend client twice in a row produces no diff for unrelated endpoints.
 
